@@ -45,6 +45,98 @@ def _guess_media_kind(filename: str) -> str:
     return "document"
 
 
+def _meaningful_attaches(attaches: list) -> list[dict]:
+    return [
+        a for a in attaches
+        if isinstance(a, dict) and a.get("_type") not in ("CONTROL", "WIDGET", "INLINE_KEYBOARD", None)
+    ]
+
+
+async def _prepare_album_item(attach: dict, client: MaxClient) -> dict | None:
+    atype = attach.get("_type", "")
+
+    if atype == "PHOTO":
+        url = _extract_photo_url(attach)
+        if not url:
+            return None
+        data = await client.download_file(url)
+        if not data:
+            return None
+        return {"kind": "photo", "data": data, "filename": "photo.jpg"}
+
+    if atype == "VIDEO":
+        thumb = attach.get("thumbnail")
+        if not thumb:
+            return None
+        data = await client.download_file(thumb)
+        if not data:
+            return None
+        return {"kind": "photo", "data": data, "filename": "video_preview.jpg"}
+
+    if atype == "FILE":
+        name = attach.get("name", "file")
+        token_url = _extract_file_url(attach)
+        if not token_url:
+            return None
+        kind = _guess_media_kind(name)
+        if kind not in ("photo", "video"):
+            return None
+        data = await client.download_file(token_url)
+        if not data:
+            return None
+        return {"kind": kind, "data": data, "filename": name}
+
+    return None
+
+
+async def _send_attaches(
+    attaches: list[dict],
+    text: str,
+    header_text: str,
+    client: MaxClient,
+    sender: TelegramSender,
+    tg_user_id: int,
+    kb=None,
+) -> None:
+    meaningful_attaches = _meaningful_attaches(attaches)
+    if not meaningful_attaches:
+        if text:
+            await sender.send(tg_user_id, f"{header_text}\n{escape(text)}", reply_markup=kb)
+        else:
+            await sender.send(tg_user_id, f"{header_text}\n<i>[без содержимого]</i>", reply_markup=kb)
+        return
+
+    album_candidates: list[dict] = []
+    album_indexes: list[int] = []
+    for idx, attach in enumerate(meaningful_attaches):
+        prepared = await _prepare_album_item(attach, client)
+        if prepared is None:
+            continue
+        album_candidates.append(prepared)
+        album_indexes.append(idx)
+
+    caption = f"{header_text}\n{escape(text)}" if text else header_text
+    used_album = False
+
+    album_index_set = set(album_indexes[:10])
+
+    if len(album_candidates) >= 2:
+        used_album = await sender.send_media_group(tg_user_id, album_candidates[:10], caption=caption)
+        if used_album:
+            log.info("Forwarded media group → TG items=%d", min(len(album_candidates), 10))
+            if kb:
+                await sender.send(tg_user_id, "↩️ <i>Ответ доступен кнопкой ниже</i>", reply_markup=kb)
+
+    for i, attach in enumerate(meaningful_attaches):
+        if used_album and i in album_index_set:
+            continue
+        cap = header_text
+        if not used_album and i == 0 and text:
+            cap = caption
+        await _send_attach(attach, client, sender, tg_user_id, cap, kb=kb)
+        log.info("Forwarded attach _type=%s → TG", attach.get("_type"))
+
+
 async def _send_attach(
     attach: dict,
     client: MaxClient,
@@ -191,27 +283,15 @@ async def _handle_linked_message(
 
     full_header = f"{header_text}\n{prefix}"
 
-    fwd_meaningful = [
-        a for a in fwd_attaches
-        if isinstance(a, dict) and a.get("_type") not in ("CONTROL", "WIDGET", "INLINE_KEYBOARD", None)
-    ]
-
-    if fwd_meaningful:
-        text_sent = False
-        for i, attach in enumerate(fwd_meaningful):
-            if i == 0 and fwd_text:
-                cap = f"{full_header}\n{escape(fwd_text)}"
-                text_sent = True
-            else:
-                cap = full_header
-            await _send_attach(attach, client, sender, tg_user_id, cap, kb=kb)
-
-        if fwd_text and not text_sent:
-            await sender.send(tg_user_id, f"{full_header}\n{escape(fwd_text)}", reply_markup=kb)
-    elif fwd_text:
-        await sender.send(tg_user_id, f"{full_header}\n{escape(fwd_text)}", reply_markup=kb)
-    else:
-        await sender.send(tg_user_id, f"{full_header}\n<i>[без содержимого]</i>", reply_markup=kb)
+    await _send_attaches(
+        attaches=fwd_attaches,
+        text=fwd_text,
+        header_text=full_header,
+        client=client,
+        sender=sender,
+        tg_user_id=tg_user_id,
+        kb=kb,
+    )
 
 
 def _human_size(n: int) -> str:
@@ -294,24 +374,16 @@ def create_max_client(
             log.info("Forwarded link type=%s → TG", link_type)
             return
 
-        meaningful_attaches = [
-            a for a in msg.attaches
-            if isinstance(a, dict) and a.get("_type") not in ("CONTROL", "WIDGET", "INLINE_KEYBOARD", None)
-        ]
-
-        if meaningful_attaches:
-            text_sent = False
-            for i, attach in enumerate(meaningful_attaches):
-                if i == 0 and msg.text:
-                    cap = f"{header_text}\n{escape(msg.text)}"
-                    text_sent = True
-                else:
-                    cap = header_text
-                await _send_attach(attach, client, sender, tg_user_id, cap, kb=kb)
-                log.info("Forwarded attach _type=%s → TG", attach.get("_type"))
-
-            if msg.text and not text_sent:
-                await sender.send(tg_user_id, f"{header_text}\n{escape(msg.text)}", reply_markup=kb)
+        if _meaningful_attaches(msg.attaches):
+            await _send_attaches(
+                attaches=msg.attaches,
+                text=msg.text,
+                header_text=header_text,
+                client=client,
+                sender=sender,
+                tg_user_id=tg_user_id,
+                kb=kb,
+            )
         else:
             body = escape(msg.text) if msg.text else "<i>[нетекстовое сообщение]</i>"
             await sender.send(tg_user_id, f"{header_text}\n{body}", reply_markup=kb)

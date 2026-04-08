@@ -2,7 +2,14 @@ import asyncio
 import io
 import logging
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import (
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputFile,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
 
@@ -209,3 +216,47 @@ class TelegramSender:
                 reply_markup=reply_markup,
             )
         )
+
+    async def send_media_group(
+        self,
+        chat_id: int,
+        items: list[dict],
+        caption: str = "",
+    ) -> bool:
+        if not items:
+            return False
+
+        caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)
+        first_caption = caption_chunks[0] if caption_chunks else ""
+        overflow = caption_chunks[1:]
+
+        media = []
+        for i, item in enumerate(items):
+            data = item["data"]
+            filename = item.get("filename") or (
+                "photo.jpg" if item["kind"] == "photo" else "video.mp4"
+            )
+            media_file = InputFile(io.BytesIO(data), filename=filename)
+            media_caption = first_caption if i == 0 and first_caption else None
+
+            if item["kind"] == "photo":
+                media.append(
+                    InputMediaPhoto(
+                        media=media_file,
+                        caption=media_caption,
+                        parse_mode=ParseMode.HTML if media_caption else None,
+                    )
+                )
+            else:
+                media.append(
+                    InputMediaVideo(
+                        media=media_file,
+                        caption=media_caption,
+                        parse_mode=ParseMode.HTML if media_caption else None,
+                    )
+                )
+
+        result = await self._retry(lambda: self._bot.send_media_group(chat_id=chat_id, media=media))
+        for chunk in overflow:
+            await self._send_text_chunks(chat_id, chunk)
+        return result is not None
