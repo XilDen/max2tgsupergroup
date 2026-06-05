@@ -142,7 +142,7 @@ class AccountManager:
         user = await self._storage.get_user(tg_user_id)
         return bool(user and user.is_active)
 
-    async def validate_credentials(self, max_token: str, max_device_id: str) -> bool:
+    async def validate_credentials(self, max_token: str, max_device_id: str) -> bool | None:
         return await validate_max_credentials(max_token, max_device_id)
 
     async def send_message(

@@ -1,8 +1,10 @@
 import logging
 from html import escape
 from typing import Awaitable, Callable
+from urllib.parse import unquote, urlparse
 
 from app.max_client import MaxClient, MaxMessage
+from app.privacy import mask_mapping_values
 from app.resolver import ContactResolver
 from app.tg_sender import TelegramSender, reply_keyboard
 
@@ -45,6 +47,74 @@ def _guess_media_kind(filename: str) -> str:
     return "document"
 
 
+def _looks_like_video(data: bytes) -> bool:
+    if not data or len(data) < 12:
+        return False
+    head = data[:64]
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return True
+    if head.startswith(b"RIFF") and b"AVI " in head[:16]:
+        return True
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return True
+    return False
+
+
+def _guess_filename_from_url(url: str, default: str) -> str:
+    try:
+        path = unquote(urlparse(url).path or "")
+    except Exception:
+        return default
+    name = path.rsplit("/", 1)[-1]
+    return name or default
+
+
+def _iter_http_urls(value):
+    if isinstance(value, str):
+        if value.startswith("http://") or value.startswith("https://"):
+            yield value
+        return
+    if isinstance(value, dict):
+        preferred_keys = (
+            "url", "baseUrl", "downloadUrl", "src", "source", "videoUrl",
+            "videoSrc", "mp4Url", "playUrl", "streamUrl", "thumbnail",
+        )
+        seen = set()
+        for key in preferred_keys:
+            if key in value:
+                for item in _iter_http_urls(value.get(key)):
+                    if item not in seen:
+                        seen.add(item)
+                        yield item
+        for nested in value.values():
+            for item in _iter_http_urls(nested):
+                if item not in seen:
+                    seen.add(item)
+                    yield item
+        return
+    if isinstance(value, list):
+        seen = set()
+        for nested in value:
+            for item in _iter_http_urls(nested):
+                if item not in seen:
+                    seen.add(item)
+                    yield item
+
+
+async def _download_video_with_fallback(attach: dict, client: MaxClient) -> tuple[bytes | None, str]:
+    urls = list(_iter_http_urls(attach))
+    thumb = attach.get("thumbnail")
+
+    for url in urls:
+        if not url or url == thumb:
+            continue
+        data = await client.download_file(url)
+        if _looks_like_video(data or b""):
+            return data, _guess_filename_from_url(url, "video.mp4")
+
+    return None, "video.mp4"
+
+
 def _meaningful_attaches(attaches: list) -> list[dict]:
     return [
         a for a in attaches
@@ -65,6 +135,9 @@ async def _prepare_album_item(attach: dict, client: MaxClient) -> dict | None:
         return {"kind": "photo", "data": data, "filename": "photo.jpg"}
 
     if atype == "VIDEO":
+        data, filename = await _download_video_with_fallback(attach, client)
+        if data:
+            return {"kind": "video", "data": data, "filename": filename}
         thumb = attach.get("thumbnail")
         if not thumb:
             return None
@@ -123,7 +196,7 @@ async def _send_attaches(
     if len(album_candidates) >= 2:
         used_album = await sender.send_media_group(tg_user_id, album_candidates[:10], caption=caption)
         if used_album:
-            log.info("Forwarded media group → TG items=%d", min(len(album_candidates), 10))
+            log.info("Forwarded media group -> TG items=%d", min(len(album_candidates), 10))
             if kb:
                 await sender.send(tg_user_id, "↩️ <i>Ответ доступен кнопкой ниже</i>", reply_markup=kb)
 
@@ -134,7 +207,7 @@ async def _send_attaches(
         if not used_album and i == 0 and text:
             cap = caption
         await _send_attach(attach, client, sender, tg_user_id, cap, kb=kb)
-        log.info("Forwarded attach _type=%s → TG", attach.get("_type"))
+        log.debug("Forwarded attach _type=%s -> TG", attach.get("_type"))
 
 
 async def _send_attach(
@@ -147,7 +220,7 @@ async def _send_attach(
 ) -> bool:
     """Process and send a single attachment. Returns True if handled."""
     atype = attach.get("_type", "")
-    log.info("Processing attach _type=%s keys=%s", atype, list(attach.keys()))
+    log.debug("Processing attach _type=%s keys=%s", atype, list(attach.keys()))
 
     if atype == "CONTROL" or atype == "WIDGET" or atype == "INLINE_KEYBOARD":
         return False
@@ -155,7 +228,7 @@ async def _send_attach(
     if atype == "PHOTO":
         url = _extract_photo_url(attach)
         if not url:
-            log.warning("PHOTO attach has no URL: %s", attach)
+            log.warning("PHOTO attach has no URL; keys=%s", list(attach.keys()))
             return False
         data = await client.download_file(url)
         if data:
@@ -165,6 +238,12 @@ async def _send_attach(
         return True
 
     if atype == "VIDEO":
+        data, filename = await _download_video_with_fallback(attach, client)
+        if data:
+            sent = await sender.send_video(tg_user_id, data, caption=header_text, filename=filename, reply_markup=kb)
+            if sent:
+                return True
+            log.warning("Failed to send VIDEO as video, falling back to preview")
         thumb = attach.get("thumbnail")
         if thumb:
             data = await client.download_file(thumb)
@@ -187,7 +266,9 @@ async def _send_attach(
                 if kind == "photo":
                     await sender.send_photo(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
                 elif kind == "video":
-                    await sender.send_video(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
+                    sent = await sender.send_video(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
+                    if not sent:
+                        await sender.send_document(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
                 else:
                     await sender.send_document(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
                 return True
@@ -312,7 +393,7 @@ def create_max_client(
     account_label: str = "",
     debug: bool = False, reply_enabled: bool = False,
 ) -> MaxClient:
-    client = MaxClient(token=max_token, device_id=max_device_id, debug=debug)
+    client = MaxClient(token=max_token, device_id=max_device_id, debug=debug, account_id=account_id)
     resolver = ContactResolver(client=client)
 
     @client.on_ready
@@ -320,17 +401,22 @@ def create_max_client(
         participant_ids = resolver.load_snapshot(snapshot)
 
         if participant_ids:
-            log.info("Batch-resolving %d participants...", len(participant_ids))
+            log.info("Batch-resolving participants account=%s count=%d", account_id, len(participant_ids))
             await resolver.resolve_users_batch(participant_ids)
-            log.info("Resolved users: %s", resolver.users)
-
-            log.info("Known chats: %s", resolver.chats)
-            log.info("Known users: %s", resolver.users)
+            log.info(
+                "Resolver cache account=%s chats=%d users=%d",
+                account_id,
+                len(resolver.chats),
+                len(resolver.users),
+            )
+            log.debug("Known chats masked account=%s: %s", account_id, mask_mapping_values(resolver.chats))
+            log.debug("Known users masked account=%s: %s", account_id, mask_mapping_values(resolver.users))
 
     @client.on_message
     async def handle_message(msg: MaxMessage):
         log.info(
-            "New message: chat=%s sender=%s is_self=%s attaches=%d",
+            "New message account=%s chat=%s sender=%s is_self=%s attaches=%d",
+            account_id,
             msg.chat_id,
             msg.sender_id,
             msg.is_self,
@@ -352,7 +438,14 @@ def create_max_client(
             sender_label = escape(sender_name if not sender_missing else "Неизвестный")
         chat_label = escape(resolver.chat_name(msg.chat_id))
         header_text = _header(sender_label, chat_label, is_dm, account_label=account_label)
-        kb = reply_keyboard(account_id, msg.chat_id, is_dm) if reply_enabled else None
+        kb = reply_keyboard(account_id, msg.chat_id, is_dm) if reply_enabled and not is_channel else None
+        if reply_enabled and is_channel:
+            log.debug(
+                "Reply button hidden for channel account=%s chat=%s type=%s",
+                account_id,
+                msg.chat_id,
+                resolver.chat_type(msg.chat_id),
+            )
 
         if stats_callback:
             if is_channel:
@@ -371,7 +464,7 @@ def create_max_client(
             await _handle_linked_message(link, link_type, header_text, client, sender, resolver, tg_user_id, kb=kb)
             if msg.text:
                 await sender.send(tg_user_id, f"{header_text}\n{escape(msg.text)}", reply_markup=kb)
-            log.info("Forwarded link type=%s → TG", link_type)
+            log.info("Forwarded link type=%s -> TG", link_type)
             return
 
         if _meaningful_attaches(msg.attaches):
@@ -387,6 +480,6 @@ def create_max_client(
         else:
             body = escape(msg.text) if msg.text else "<i>[нетекстовое сообщение]</i>"
             await sender.send(tg_user_id, f"{header_text}\n{body}", reply_markup=kb)
-            log.info("Forwarded text → TG")
+            log.info("Forwarded text -> TG")
 
     return client

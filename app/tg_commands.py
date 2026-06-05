@@ -19,6 +19,11 @@ from app.account_manager import (
     DuplicateActiveBindingError,
     MaxBindingsLimitError,
 )
+from app.time_utils import (
+    DEFAULT_APP_TIMEZONE,
+    format_app_datetime,
+    seconds_until_next_app_day,
+)
 
 log = logging.getLogger(__name__)
 
@@ -193,11 +198,16 @@ def _ops_key(context: ContextTypes.DEFAULT_TYPE, suffix: str) -> str:
     return f"{prefix}:ops:{suffix}"
 
 
-def _seconds_until_next_utc_day() -> int:
-    now = int(time.time())
-    day = now // 86400
-    next_day_ts = (day + 1) * 86400
-    return max(1, next_day_ts - now)
+def _app_timezone(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return str(context.bot_data.get("app_timezone", DEFAULT_APP_TIMEZONE))
+
+
+def _admin_timestamp(context: ContextTypes.DEFAULT_TYPE) -> str:
+    return format_app_datetime(timezone_name=_app_timezone(context))
+
+
+def _seconds_until_next_local_day(context: ContextTypes.DEFAULT_TYPE) -> int:
+    return seconds_until_next_app_day(_app_timezone(context))
 
 
 async def _counter_incr_with_expiry(store, key: str, expiry_sec: int) -> int:
@@ -244,14 +254,14 @@ async def _apply_action_guards(
         return False, "⚠️ Сервис временно перегружен, попробуйте чуть позже."
 
     daily_key = _ops_key(context, f"daily:{action}:{tg_user_id}")
-    daily_cnt = await _counter_incr_with_expiry(store, daily_key, _seconds_until_next_utc_day())
+    daily_cnt = await _counter_incr_with_expiry(store, daily_key, _seconds_until_next_local_day(context))
     if daily_cnt > daily_limit:
         return False, f"⚠️ Достигнут суточный лимит на {action}: {daily_limit}."
 
     skip_cooldown = False
     if cooldown_grace_attempts > 0:
         grace_key = _ops_key(context, f"grace:{action}:{tg_user_id}")
-        grace_cnt = await _counter_incr_with_expiry(store, grace_key, _seconds_until_next_utc_day())
+        grace_cnt = await _counter_incr_with_expiry(store, grace_key, _seconds_until_next_local_day(context))
         skip_cooldown = grace_cnt <= cooldown_grace_attempts
 
     if not skip_cooldown:
@@ -269,7 +279,9 @@ async def _notify_admin_registration(update: Update, context: ContextTypes.DEFAU
     tg_user_id = int(update.effective_user.id)
     username = _display_user(update)
     text = (
-        f"Пользователь {username} зарегистрировался в боте. Для активации `/activate {tg_user_id}`."
+        f"Пользователь {username} зарегистрировался в боте.\n"
+        f"Время: `{_admin_timestamp(context)}` ({_app_timezone(context)})\n"
+        f"Для активации `/activate {tg_user_id}`."
     )
     await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
 
@@ -349,6 +361,11 @@ async def _on_register(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     try:
         is_valid_creds = await manager.validate_credentials(max_token=token, max_device_id=device_id)
+        if is_valid_creds is None:
+            await update.message.reply_text(
+                "⚠️ Проверка реквизитов MAX временно недоступна. Попробуйте еще раз чуть позже."
+            )
+            return
         if not is_valid_creds:
             await update.message.reply_text("⚠️ Реквизиты MAX некорректны: device_id/token не приняты.")
             return
@@ -409,6 +426,11 @@ async def _on_bind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     title = " ".join(args[3:]).strip()[:25]
     is_valid_creds = await manager.validate_credentials(max_token=token, max_device_id=device_id)
+    if is_valid_creds is None:
+        await update.message.reply_text(
+            "⚠️ Проверка реквизитов MAX временно недоступна. Попробуйте еще раз чуть позже."
+        )
+        return
     if not is_valid_creds:
         await update.message.reply_text("⚠️ Реквизиты MAX некорректны: device_id/token не приняты.")
         return
@@ -530,7 +552,7 @@ async def _on_reports(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     lines = [
-        "Отчет за последние 10 дней:",
+        f"Отчет за последние 10 дней ({_app_timezone(context)}):",
         "дата | MAX ЛС | MAX группы | MAX каналы | ответы в ЛС | ответы в группы",
     ]
     for row in rows:
@@ -816,6 +838,7 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"📩 Сообщение от пользователя\n"
                 f"ID: <code>{tg_user_id}</code>\n"
                 f"Ник: {escape(username)}\n\n"
+                f"Время: <code>{escape(_admin_timestamp(context))}</code> ({escape(_app_timezone(context))})\n\n"
                 f"{escape(text)}"
             )
             try:

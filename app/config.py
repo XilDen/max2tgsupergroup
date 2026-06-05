@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from app.time_utils import DEFAULT_APP_TIMEZONE, load_timezone, normalize_timezone_name
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -17,6 +19,7 @@ class Settings:
     tg_queue_max_attempts: int
     tg_queue_job_ttl_sec: int
     encryption_key: str
+    app_timezone: str
     debug: bool = False
     reply_enabled: bool = False
 
@@ -32,6 +35,12 @@ def load_settings() -> Settings:
             "Copy .env.example to .env and fill in the values."
         )
 
+    app_timezone = normalize_timezone_name(os.environ.get("APP_TIMEZONE", DEFAULT_APP_TIMEZONE))
+    try:
+        load_timezone(app_timezone)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
     return Settings(
         tg_bot_token=os.environ["TG_BOT_TOKEN"],
         tg_admin_id=int(os.environ["TG_ADMIN_ID"]),
@@ -44,6 +53,7 @@ def load_settings() -> Settings:
         tg_queue_max_attempts=int(os.environ.get("TG_QUEUE_MAX_ATTEMPTS", "3")),
         tg_queue_job_ttl_sec=int(os.environ.get("TG_QUEUE_JOB_TTL_SEC", "300")),
         encryption_key=os.environ["ENCRYPTION_KEY"],
+        app_timezone=app_timezone,
         debug=os.environ.get("DEBUG", "").lower() in ("1", "true", "yes"),
         reply_enabled=os.environ.get("REPLY_ENABLED", "").lower() in ("1", "true", "yes"),
     )

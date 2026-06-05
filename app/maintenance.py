@@ -9,6 +9,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from shutil import copy2
 
+from app.time_utils import DEFAULT_APP_TIMEZONE, app_now, load_timezone
+
 log = logging.getLogger(__name__)
 
 LOG_DIR = "logs"
@@ -35,13 +37,67 @@ class _AppOnlyFilter(logging.Filter):
         return not record.name.startswith(self.DB_PREFIXES)
 
 
-def configure_logging(debug: bool) -> None:
+class _TransientTelegramPollingFilter(logging.Filter):
+    _POLLING_MARKERS = (
+        "polling for updates",
+        "get_updates",
+    )
+    _TRANSIENT_MARKERS = (
+        "NetworkError",
+        "TimedOut",
+        "ReadError",
+        "ReadTimeout",
+        "ConnectError",
+        "ConnectTimeout",
+        "RemoteProtocolError",
+        "PoolTimeout",
+        "httpx.",
+        "httpcore.",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not record.name.startswith("telegram.ext"):
+            return True
+        message = record.getMessage().lower()
+        if not any(marker in message for marker in self._POLLING_MARKERS):
+            return True
+        exc_text = self._exception_chain_text(record.exc_info[1] if record.exc_info else None)
+        if not exc_text:
+            return True
+        return not any(marker in exc_text for marker in self._TRANSIENT_MARKERS)
+
+    def _exception_chain_text(self, exc: BaseException | None) -> str:
+        parts: list[str] = []
+        seen: set[int] = set()
+        while exc is not None and id(exc) not in seen:
+            seen.add(id(exc))
+            parts.append(f"{exc.__class__.__module__}.{exc.__class__.__name__}: {exc}")
+            exc = exc.__cause__ or exc.__context__
+        return " | ".join(parts)
+
+
+class AppTimezoneFormatter(logging.Formatter):
+    def __init__(self, fmt: str, timezone_name: str):
+        super().__init__(fmt)
+        self._tz = load_timezone(timezone_name)
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        dt = datetime.fromtimestamp(record.created, self._tz)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat(sep=" ", timespec="seconds")
+
+
+def configure_logging(debug: bool, timezone_name: str = DEFAULT_APP_TIMEZONE) -> None:
     level = logging.DEBUG if debug else logging.INFO
     os.makedirs(LOG_DIR, exist_ok=True)
     app_log_path = os.path.join(LOG_DIR, APP_LOG_FILE)
     db_log_path = os.path.join(LOG_DIR, DB_LOG_FILE)
 
-    formatter = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    formatter = AppTimezoneFormatter(
+        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        timezone_name=timezone_name,
+    )
 
     app_file_handler = RotatingFileHandler(
         app_log_path,
@@ -52,6 +108,7 @@ def configure_logging(debug: bool) -> None:
     app_file_handler.setLevel(level)
     app_file_handler.setFormatter(formatter)
     app_file_handler.addFilter(_AppOnlyFilter())
+    app_file_handler.addFilter(_TransientTelegramPollingFilter())
 
     db_file_handler = RotatingFileHandler(
         db_log_path,
@@ -62,10 +119,12 @@ def configure_logging(debug: bool) -> None:
     db_file_handler.setLevel(level)
     db_file_handler.setFormatter(formatter)
     db_file_handler.addFilter(_DbOnlyFilter())
+    db_file_handler.addFilter(_TransientTelegramPollingFilter())
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(level)
     stream_handler.setFormatter(formatter)
+    stream_handler.addFilter(_TransientTelegramPollingFilter())
 
     logging.basicConfig(
         level=level,
@@ -96,11 +155,15 @@ def _backup_db_sync(db_path: str, backup_path: str) -> None:
         copy2(db_path, backup_path)
 
 
-async def backup_db_once(db_path: str, backups_dir: str = "data/backups") -> str | None:
+async def backup_db_once(
+    db_path: str,
+    backups_dir: str = "data/backups",
+    timezone_name: str = DEFAULT_APP_TIMEZONE,
+) -> str | None:
     if not os.path.exists(db_path):
         return None
 
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = app_now(timezone_name).strftime("%Y%m%d_%H%M%S")
     backup_name = f"max2tg_{ts}.sqlite3"
     backup_path = os.path.join(backups_dir, backup_name)
     await asyncio.to_thread(_backup_db_sync, db_path, backup_path)
@@ -116,7 +179,11 @@ async def backup_db_once(db_path: str, backups_dir: str = "data/backups") -> str
     return backup_path
 
 
-async def weekly_backup_loop(db_path: str, stop_event: asyncio.Event) -> None:
+async def weekly_backup_loop(
+    db_path: str,
+    stop_event: asyncio.Event,
+    timezone_name: str = DEFAULT_APP_TIMEZONE,
+) -> None:
     while not stop_event.is_set():
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=BACKUP_INTERVAL_SEC)
@@ -126,7 +193,7 @@ async def weekly_backup_loop(db_path: str, stop_event: asyncio.Event) -> None:
             pass
 
         try:
-            backup_path = await backup_db_once(db_path)
+            backup_path = await backup_db_once(db_path, timezone_name=timezone_name)
             if backup_path:
                 log.info("Weekly DB backup created: %s", backup_path)
         except Exception:

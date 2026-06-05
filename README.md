@@ -75,6 +75,7 @@ cp .env.example .env
 | `TG_ADMIN_ID` | да | Telegram ID администратора бота |
 | `ENCRYPTION_KEY` | да | Секрет для шифрования `max_token` и `max_device_id` в SQLite |
 | `DB_PATH` | нет | Путь к SQLite БД (по умолчанию `data/max2tg.sqlite3`) |
+| `APP_TIMEZONE` | нет | Глобальный часовой пояс для логов, отчетов, backup-имен и админских событий (по умолчанию `Europe/Moscow`) |
 | `REDIS_URL` | нет | URL Redis для внешней очереди отправки (по умолчанию `redis://127.0.0.1:6379/0`; в Docker Compose переопределяется на `redis://redis:6379/0`) |
 | `REDIS_KEY_PREFIX` | нет | Глобальный префикс ключей Redis (по умолчанию `max2tg`) |
 | `TG_QUEUE_WORKERS` | нет | Количество воркеров отправки в TG |
@@ -287,6 +288,7 @@ cp .env.example .env
 | `TG_ADMIN_ID` | yes | Telegram bot admin user ID |
 | `ENCRYPTION_KEY` | yes | Secret used to encrypt `max_token` and `max_device_id` in SQLite |
 | `DB_PATH` | no | SQLite path (default `data/max2tg.sqlite3`) |
+| `APP_TIMEZONE` | no | Global timezone for logs, reports, backup names, and admin-visible event times (default `Europe/Moscow`) |
 | `REDIS_URL` | no | Redis URL for outbound queue backend (default `redis://127.0.0.1:6379/0`; overridden to `redis://redis:6379/0` in Docker Compose) |
 | `REDIS_KEY_PREFIX` | no | Global Redis key prefix (default `max2tg`) |
 | `TG_QUEUE_WORKERS` | no | Number of TG sender workers |

@@ -44,7 +44,7 @@ _HTTP_HEADERS = {
 }
 
 
-async def validate_max_credentials(token: str, device_id: str, timeout_sec: float = 12.0) -> bool:
+async def validate_max_credentials(token: str, device_id: str, timeout_sec: float = 12.0) -> bool | None:
     """Validate Max credentials by performing WS handshake + auth snapshot."""
     if not token or not device_id:
         return False
@@ -82,7 +82,7 @@ async def validate_max_credentials(token: str, device_id: str, timeout_sec: floa
                     timeout_left = max(0.2, deadline - time.monotonic())
                     msg = await ws.receive(timeout=timeout_left)
                     if msg.type != aiohttp.WSMsgType.TEXT:
-                        return False
+                        return None
                     data = json.loads(msg.data)
                     op = data.get("opcode")
                     cmd = data.get("cmd")
@@ -102,8 +102,8 @@ async def validate_max_credentials(token: str, device_id: str, timeout_sec: floa
                     if op == OpCode.AUTH_SNAPSHOT and cmd == 3:
                         return False
     except Exception:
-        return False
-    return False
+        return None
+    return None
 
 
 class OpCode(IntEnum):
@@ -140,10 +140,17 @@ class MaxClient:
     HEARTBEAT_SEC = 30
     RECONNECT_SEC = 5
 
-    def __init__(self, token: str, device_id: str, debug: bool = False):
+    def __init__(
+        self,
+        token: str,
+        device_id: str,
+        debug: bool = False,
+        account_id: int | None = None,
+    ):
         self.token = token
         self.device_id = device_id
         self.debug = debug
+        self.account_id = account_id
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._seq = 0
         self._my_id = None
@@ -179,12 +186,18 @@ class MaxClient:
             "payload": payload,
         }
         self._seq += 1
-        log.debug(">>> SEND op=%d seq=%d", opcode, seq)
+        log.debug("account=%s >>> SEND op=%d seq=%d", self.account_id, opcode, seq)
         raw = json.dumps(pkt, ensure_ascii=False)
         await self._ws.send_str(raw)
         return seq
 
-    async def cmd(self, opcode: int, payload: dict, timeout: float = 10) -> dict:
+    async def cmd(
+        self,
+        opcode: int,
+        payload: dict,
+        timeout: float = 10,
+        timeout_log_level: int = logging.WARNING,
+    ) -> dict:
         """Send a request and wait for the response (cmd=1 with same seq)."""
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[dict] = loop.create_future()
@@ -193,7 +206,7 @@ class MaxClient:
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
-            log.warning("cmd timeout: op=%d seq=%d", opcode, seq)
+            log.log(timeout_log_level, "cmd timeout account=%s op=%d seq=%d", self.account_id, opcode, seq)
             return {}
         finally:
             self._pending.pop(seq, None)
@@ -216,7 +229,7 @@ class MaxClient:
             self._session = session
             while not self._stop_event.is_set():
                 try:
-                    log.info("Connecting to %s ...", self.WS_URL)
+                    log.info("Connecting account=%s to %s ...", self.account_id, self.WS_URL)
                     async with session.ws_connect(
                         self.WS_URL, headers=_WS_HEADERS, ssl=False
                     ) as ws:
@@ -224,7 +237,7 @@ class MaxClient:
                         self._seq = 0
                         self._pending.clear()
 
-                        log.info("Connected. Sending handshake...")
+                        log.info("Connected account=%s. Sending handshake...", self.account_id)
                         await self._send(
                             OpCode.HANDSHAKE,
                             {
@@ -248,11 +261,11 @@ class MaxClient:
                                 aiohttp.WSMsgType.CLOSED,
                                 aiohttp.WSMsgType.ERROR,
                             ):
-                                log.warning("WebSocket closed/error: %s", msg.type)
+                                log.warning("WebSocket closed/error account=%s type=%s", self.account_id, msg.type)
                                 break
 
                 except Exception:
-                    log.exception("Connection error")
+                    log.exception("Connection error account=%s", self.account_id)
 
                 finally:
                     if self._heartbeat_task:
@@ -264,7 +277,7 @@ class MaxClient:
 
                 if self._stop_event.is_set():
                     break
-                log.info("Reconnecting in %ds...", self.RECONNECT_SEC)
+                log.info("Reconnecting account=%s in %ds...", self.account_id, self.RECONNECT_SEC)
                 await asyncio.sleep(self.RECONNECT_SEC)
 
     async def stop(self) -> None:
@@ -286,7 +299,7 @@ class MaxClient:
             if not fut.done():
                 fut.set_result(payload)
             if op not in (OpCode.HANDSHAKE, OpCode.AUTH_SNAPSHOT):
-                log.debug("<<< RESP  op=%-4s seq=%s", op, seq)
+                log.debug("account=%s <<< RESP  op=%-4s seq=%s", self.account_id, op, seq)
 
         # cmd=3 is an error response
         elif cmd == 3 and seq in self._pending:
@@ -295,10 +308,17 @@ class MaxClient:
                 fut.set_result({})
             err_code = payload.get("error") if isinstance(payload, dict) else None
             err_title = payload.get("title") if isinstance(payload, dict) else None
-            log.warning("<<< ERROR op=%-4s seq=%s error=%s title=%s", op, seq, err_code, err_title)
+            log.warning(
+                "account=%s <<< ERROR op=%-4s seq=%s error=%s title_present=%s",
+                self.account_id,
+                op,
+                seq,
+                err_code,
+                bool(err_title),
+            )
 
         if op == OpCode.HANDSHAKE and cmd == 1:
-            log.info("Handshake OK → sending auth token...")
+            log.info("Handshake OK account=%s -> sending auth token...", self.account_id)
             await self._send(
                 OpCode.AUTH_SNAPSHOT,
                 {
@@ -310,7 +330,7 @@ class MaxClient:
 
         elif op == OpCode.AUTH_SNAPSHOT and cmd == 1:
             self._my_id = payload.get("profile", {}).get("id")
-            log.info("Authorized! my_id=%s", self._my_id)
+            log.info("Authorized account=%s my_id=%s", self.account_id, self._my_id)
 
             if self._on_ready_cb:
                 await self._on_ready_cb(payload)
@@ -318,7 +338,7 @@ class MaxClient:
         elif op == OpCode.AUTH_SNAPSHOT and cmd == 3:
             err_code = payload.get("error") if isinstance(payload, dict) else None
             err_title = payload.get("title") if isinstance(payload, dict) else None
-            log.warning("Auth failed: error=%s title=%s", err_code, err_title)
+            log.warning("Auth failed account=%s error=%s title_present=%s", self.account_id, err_code, bool(err_title))
 
         elif op == OpCode.DISPATCH:
             self._dispatch_counter += 1
@@ -329,10 +349,10 @@ class MaxClient:
                     asyncio.create_task(self._on_message_cb(msg))
 
         elif op in (OpCode.HEARTBEAT_PING,):
-            log.debug("Heartbeat op=%s", op)
+            log.debug("Heartbeat account=%s op=%s", self.account_id, op)
 
         elif cmd not in (1, 3):
-            log.info("<<< EVENT op=%-4s cmd=%-3s", op, cmd)
+            log.debug("account=%s <<< EVENT op=%-4s cmd=%-3s", self.account_id, op, cmd)
 
     # ── WebSocket RPC: fetch contacts ──────────────────────────────
 
@@ -340,8 +360,17 @@ class MaxClient:
         """Fetch contact info via WS opcode 32. Returns raw response payload."""
         if not contact_ids:
             return {}
-        resp = await self.cmd(OpCode.CONTACT_GET, {"contactIds": contact_ids})
-        log.info("fetch_contacts(%s) → keys: %s", contact_ids, list(resp.keys()))
+        resp = await self.cmd(
+            OpCode.CONTACT_GET,
+            {"contactIds": contact_ids},
+            timeout_log_level=logging.DEBUG,
+        )
+        log.debug(
+            "fetch_contacts account=%s count=%d keys=%s",
+            self.account_id,
+            len(contact_ids),
+            list(resp.keys()),
+        )
         return resp
 
     async def fetch_chat(self, chat_id: Any) -> dict:
@@ -349,10 +378,18 @@ class MaxClient:
         if chat_id is None:
             return {}
         # Backend schema may vary; try common variants.
-        resp = await self.cmd(OpCode.CHAT_GET, {"chatId": chat_id})
+        resp = await self.cmd(
+            OpCode.CHAT_GET,
+            {"chatId": chat_id},
+            timeout_log_level=logging.DEBUG,
+        )
         if resp:
             return resp
-        resp = await self.cmd(OpCode.CHAT_GET, {"chatIds": [chat_id]})
+        resp = await self.cmd(
+            OpCode.CHAT_GET,
+            {"chatIds": [chat_id]},
+            timeout_log_level=logging.DEBUG,
+        )
         return resp or {}
 
     async def send_message(self, chat_id, text: str) -> dict:
@@ -366,7 +403,7 @@ class MaxClient:
                 "notify": True,
             },
         )
-        log.info("send_message(chat=%s) → %s", chat_id, "OK" if resp else "FAIL")
+        log.info("send_message account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
         return resp
 
     async def download_file(self, url: str) -> bytes | None:
@@ -383,11 +420,11 @@ class MaxClient:
             ) as resp:
                 if resp.status == 200:
                     data = await resp.read()
-                    log.info("Downloaded %s (%d bytes)", url[:120], len(data))
+                    log.debug("Downloaded file account=%s bytes=%d", self.account_id, len(data))
                     return data
-                log.warning("Download failed %s — HTTP %d", url[:120], resp.status)
+                log.warning("Download failed account=%s HTTP %d", self.account_id, resp.status)
         except Exception:
-            log.exception("Download error: %s", url[:120])
+            log.exception("Download error account=%s", self.account_id)
         finally:
             if close_after:
                 await session.close()

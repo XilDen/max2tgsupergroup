@@ -15,6 +15,7 @@ from app.message_queue import QueuedTelegramSender
 from app.storage import Storage
 from app.tg_handler import build_tg_app
 from app.tg_sender import TelegramSender
+from app.time_utils import format_app_datetime
 
 threading.stack_size(524288)
 
@@ -55,17 +56,26 @@ async def main():
 
     settings = load_settings()
 
-    configure_logging(settings.debug)
+    configure_logging(settings.debug, timezone_name=settings.app_timezone)
 
     log.info("Debug mode: %s", "ON" if settings.debug else "OFF")
+    log.info("Application timezone: %s", settings.app_timezone)
 
-    storage = Storage(settings.db_path, encryption_key=settings.encryption_key)
+    storage = Storage(
+        settings.db_path,
+        encryption_key=settings.encryption_key,
+        timezone_name=settings.app_timezone,
+    )
     await storage.init()
     await storage.cleanup_daily_metrics_if_needed(keep_days=180)
 
     tg_transport = TelegramSender(settings.tg_bot_token)
     await tg_transport.start()
-    health_monitor = AppLogHealthMonitor(bot=tg_transport.bot, admin_id=settings.tg_admin_id)
+    health_monitor = AppLogHealthMonitor(
+        bot=tg_transport.bot,
+        admin_id=settings.tg_admin_id,
+        timezone_name=settings.app_timezone,
+    )
     health_monitor.install()
     health_stop_event = asyncio.Event()
     health_task = asyncio.create_task(
@@ -94,7 +104,12 @@ async def main():
     await _bootstrap_legacy_account(settings, storage, manager)
     await manager.start_all()
 
-    tg_app = build_tg_app(settings.tg_bot_token, manager, settings.tg_admin_id)
+    tg_app = build_tg_app(
+        settings.tg_bot_token,
+        manager,
+        settings.tg_admin_id,
+        app_timezone=settings.app_timezone,
+    )
     tg_app.bot_data["redis_key_prefix"] = settings.redis_key_prefix
     askme_redis = None
     cooldown_store = MemoryCooldownStore()
@@ -117,13 +132,23 @@ async def main():
     await tg_app.updater.start_polling(drop_pending_updates=True)
     log.info("Telegram polling started")
     try:
-        await tg_transport.bot.send_message(chat_id=settings.tg_admin_id, text="🤫 я запустилась")
+        await tg_transport.bot.send_message(
+            chat_id=settings.tg_admin_id,
+            text=(
+                "🤫 я запустилась\n"
+                f"Время: {format_app_datetime(timezone_name=settings.app_timezone)} ({settings.app_timezone})"
+            ),
+        )
     except Exception:
         log.exception("Failed to send startup notification to admin_id=%s", settings.tg_admin_id)
 
     backup_stop_event = asyncio.Event()
     backup_task = asyncio.create_task(
-        weekly_backup_loop(settings.db_path, backup_stop_event),
+        weekly_backup_loop(
+            settings.db_path,
+            backup_stop_event,
+            timezone_name=settings.app_timezone,
+        ),
         name="weekly-db-backup",
     )
 

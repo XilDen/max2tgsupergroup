@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from telegram import Bot
 
+from app.time_utils import DEFAULT_APP_TIMEZONE, format_app_datetime
+
 
 @dataclass(frozen=True)
 class _ErrorEvent:
@@ -53,9 +55,15 @@ class AppLogHealthMonitor:
         "broken pipe",
     )
 
-    def __init__(self, bot: Bot, admin_id: int):
+    def __init__(
+        self,
+        bot: Bot,
+        admin_id: int,
+        timezone_name: str = DEFAULT_APP_TIMEZONE,
+    ):
         self._bot = bot
         self._admin_id = int(admin_id)
+        self._timezone_name = timezone_name
         self._events: deque[_ErrorEvent] = deque()
         self._handler = _ErrorCaptureHandler(self)
         self._lock = asyncio.Lock()
@@ -132,6 +140,7 @@ class AppLogHealthMonitor:
 
         lines = [
             "ALERT: обнаружены систематические ошибки за последние 24 часа.",
+            f"check time: {format_app_datetime(timezone_name=self._timezone_name)} ({self._timezone_name})",
             f"non-transient errors: {total_cnt}",
             f"unique signatures: {unique_cnt}",
             f"critical: {critical_cnt}",

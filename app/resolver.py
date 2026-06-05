@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from app.privacy import mask_text
+
 if TYPE_CHECKING:
     from app.max_client import MaxClient
 
@@ -23,6 +25,9 @@ class ContactResolver:
 
     def chat_name(self, chat_id: Any) -> str:
         return self.chats.get(chat_id, str(chat_id))
+
+    def chat_type(self, chat_id: Any) -> str:
+        return str(self.chat_types.get(chat_id) or "")
 
     def is_dm(self, chat_id: Any) -> bool:
         ctype = self.chat_types.get(chat_id)
@@ -177,7 +182,7 @@ class ContactResolver:
             name = self._extract_name_from_contact(c)
             if uid is not None and name:
                 self.users[uid] = name
-                log.info("Resolved contact %s → %s", uid, name)
+                log.debug("Resolved contact %s -> %s", uid, mask_text(name))
 
         # Maybe the response IS the contact (single user)
         if not contacts and resp.get("id"):
@@ -185,7 +190,7 @@ class ContactResolver:
             name = self._extract_name_from_contact(resp)
             if uid and name:
                 self.users[uid] = name
-                log.info("Resolved contact %s → %s", uid, name)
+                log.debug("Resolved contact %s -> %s", uid, mask_text(name))
 
         # Walk the entire response for any name-bearing objects
         self._deep_extract(resp, depth=0)
@@ -198,7 +203,7 @@ class ContactResolver:
             name = self._extract_name_from_contact(obj)
             if uid is not None and name and uid not in self.users:
                 self.users[uid] = name
-                log.info("Deep-resolved contact %s → %s", uid, name)
+                log.debug("Deep-resolved contact %s -> %s", uid, mask_text(name))
             for v in obj.values():
                 self._deep_extract(v, depth + 1)
         elif isinstance(obj, list):

@@ -165,11 +165,11 @@ class TelegramSender:
         caption: str = "",
         filename: str = "video.mp4",
         reply_markup=None,
-    ) -> None:
+    ) -> bool:
         caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)
         first_caption = caption_chunks[0] if caption_chunks else ""
         overflow = caption_chunks[1:]
-        await self._retry(
+        result = await self._retry(
             lambda: self._bot.send_video(
                 chat_id=chat_id,
                 video=InputFile(io.BytesIO(data), filename=filename),
@@ -180,6 +180,7 @@ class TelegramSender:
         )
         for chunk in overflow:
             await self._send_text_chunks(chat_id, chunk)
+        return result is not None
 
     async def send_voice(self, chat_id: int, data: bytes, caption: str = "", reply_markup=None) -> None:
         caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)

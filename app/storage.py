@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any
 
 import aiosqlite
 from cryptography.exceptions import InvalidTag
 
 from app.crypto_box import SecretBox
+from app.time_utils import DEFAULT_APP_TIMEZONE, app_today, format_app_datetime
 
 
 @dataclass(frozen=True)
@@ -42,10 +43,19 @@ class DailyReportRow:
 
 
 class Storage:
-    def __init__(self, db_path: str, encryption_key: str):
+    def __init__(
+        self,
+        db_path: str,
+        encryption_key: str,
+        timezone_name: str = DEFAULT_APP_TIMEZONE,
+    ):
         self._db_path = db_path
+        self._timezone_name = timezone_name
         self._last_stats_cleanup_day: str | None = None
         self._box = SecretBox(encryption_key)
+
+    def _local_timestamp(self) -> str:
+        return format_app_datetime(timezone_name=self._timezone_name)
 
     async def init(self) -> None:
         os.makedirs(os.path.dirname(self._db_path) or ".", exist_ok=True)
@@ -124,15 +134,16 @@ class Storage:
             return row is not None
 
     async def accept_terms(self, tg_user_id: int) -> None:
+        ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
                 """
-                INSERT INTO tg_users (tg_user_id, is_active, terms_accepted_at)
-                VALUES (?, 0, CURRENT_TIMESTAMP)
+                INSERT INTO tg_users (tg_user_id, is_active, created_at, terms_accepted_at)
+                VALUES (?, 0, ?, ?)
                 ON CONFLICT(tg_user_id) DO UPDATE SET
-                    terms_accepted_at = COALESCE(tg_users.terms_accepted_at, CURRENT_TIMESTAMP)
+                    terms_accepted_at = COALESCE(tg_users.terms_accepted_at, ?)
                 """,
-                (tg_user_id,),
+                (tg_user_id, ts, ts, ts),
             )
             await db.commit()
 
@@ -165,15 +176,16 @@ class Storage:
         )
 
     async def ensure_user(self, tg_user_id: int) -> TgUserRecord:
+        ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute(
                 """
-                INSERT INTO tg_users (tg_user_id, is_active, terms_accepted_at)
-                VALUES (?, 0, CURRENT_TIMESTAMP)
+                INSERT INTO tg_users (tg_user_id, is_active, created_at, terms_accepted_at)
+                VALUES (?, 0, ?, ?)
                 ON CONFLICT(tg_user_id) DO NOTHING
                 """,
-                (tg_user_id,),
+                (tg_user_id, ts, ts),
             )
             await db.commit()
             cur = await db.execute(
@@ -194,17 +206,18 @@ class Storage:
             return self._row_to_user(row) if row else None
 
     async def activate_user(self, tg_user_id: int) -> TgUserRecord:
+        ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute(
                 """
-                INSERT INTO tg_users (tg_user_id, is_active, activated_at)
-                VALUES (?, 1, CURRENT_TIMESTAMP)
+                INSERT INTO tg_users (tg_user_id, is_active, created_at, activated_at)
+                VALUES (?, 1, ?, ?)
                 ON CONFLICT(tg_user_id) DO UPDATE SET
                     is_active=1,
-                    activated_at=CURRENT_TIMESTAMP
+                    activated_at=?
                 """,
-                (tg_user_id,),
+                (tg_user_id, ts, ts, ts),
             )
             await db.commit()
             cur = await db.execute(
@@ -215,17 +228,18 @@ class Storage:
             return self._row_to_user(row)
 
     async def deactivate_user(self, tg_user_id: int) -> TgUserRecord:
+        ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             await db.execute(
                 """
-                INSERT INTO tg_users (tg_user_id, is_active, activated_at)
-                VALUES (?, 0, NULL)
+                INSERT INTO tg_users (tg_user_id, is_active, created_at, activated_at)
+                VALUES (?, 0, ?, NULL)
                 ON CONFLICT(tg_user_id) DO UPDATE SET
                     is_active=0,
                     activated_at=NULL
                 """,
-                (tg_user_id,),
+                (tg_user_id, ts),
             )
             await db.commit()
             cur = await db.execute(
@@ -275,14 +289,15 @@ class Storage:
     ) -> MaxAccountRecord:
         enc_token = self._box.encrypt(max_token)
         enc_device_id = self._box.encrypt(max_device_id)
+        ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """
-                INSERT INTO max_accounts (tg_user_id, max_token, max_device_id, title, is_active)
-                VALUES (?, ?, ?, ?, 1)
+                INSERT INTO max_accounts (tg_user_id, max_token, max_device_id, title, is_active, created_at)
+                VALUES (?, ?, ?, ?, 1, ?)
                 """,
-                (tg_user_id, enc_token, enc_device_id, title),
+                (tg_user_id, enc_token, enc_device_id, title, ts),
             )
             await db.commit()
             acc_id = int(cur.lastrowid)
@@ -379,7 +394,7 @@ class Storage:
     async def increment_daily_metric(self, metric: str, stat_day: str | None = None) -> None:
         if metric not in {"forward_dm", "forward_group", "forward_channel", "reply_dm", "reply_group"}:
             raise ValueError(f"Unsupported metric: {metric}")
-        day = stat_day or date.today().isoformat()
+        day = stat_day or app_today(self._timezone_name).isoformat()
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
                 """
@@ -395,21 +410,22 @@ class Storage:
 
     async def cleanup_daily_metrics_if_needed(self, keep_days: int = 180) -> None:
         keep_days = max(1, keep_days)
-        today = date.today().isoformat()
-        if self._last_stats_cleanup_day == today:
+        today = app_today(self._timezone_name)
+        today_str = today.isoformat()
+        if self._last_stats_cleanup_day == today_str:
             return
-        cutoff = (date.today() - timedelta(days=keep_days)).isoformat()
+        cutoff = (today - timedelta(days=keep_days)).isoformat()
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
                 "DELETE FROM daily_report_stats WHERE day < ?",
                 (cutoff,),
             )
             await db.commit()
-        self._last_stats_cleanup_day = today
+        self._last_stats_cleanup_day = today_str
 
     async def get_daily_report(self, days: int = 10) -> list[DailyReportRow]:
         days = max(1, min(days, 180))
-        end_day = date.today()
+        end_day = app_today(self._timezone_name)
         start_day = end_day - timedelta(days=days - 1)
 
         counters: dict[str, dict[str, int]] = {}
