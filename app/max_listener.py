@@ -3,7 +3,7 @@ from html import escape
 from typing import Awaitable, Callable
 from urllib.parse import unquote, urlparse
 
-from app.max_client import MaxClient, MaxMessage
+from app.max_client import MAX_FILE_DOWNLOAD_BYTES, MAX_IMAGE_DOWNLOAD_BYTES, MaxClient, MaxMessage
 from app.privacy import mask_mapping_values
 from app.resolver import ContactResolver
 from app.tg_sender import TelegramSender, reply_keyboard
@@ -12,6 +12,8 @@ log = logging.getLogger(__name__)
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+MAX_ATTACHMENTS_PER_MESSAGE = 10
+OVERSIZED_NOTICE = "вырезано так как файл слишком большой"
 
 
 def _header(sender_label: str, chat_label: str, is_dm: bool, account_label: str = "") -> str:
@@ -45,6 +47,43 @@ def _guess_media_kind(filename: str) -> str:
         if name_lower.endswith(ext):
             return "video"
     return "document"
+
+
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _media_limit_bytes(kind: str) -> int:
+    return MAX_IMAGE_DOWNLOAD_BYTES if kind == "photo" else MAX_FILE_DOWNLOAD_BYTES
+
+
+def _attachment_declared_size(attach: dict) -> int:
+    for key in ("size", "fileSize", "bytes", "contentLength", "content_length"):
+        value = _safe_int(attach.get(key), default=0)
+        if value > 0:
+            return value
+    return 0
+
+
+def _is_oversized(attach: dict, kind: str) -> bool:
+    declared_size = _attachment_declared_size(attach)
+    return declared_size > _media_limit_bytes(kind)
+
+
+async def _download_limited(client: MaxClient, url: str, kind: str) -> bytes | None:
+    return await client.download_file(url, max_bytes=_media_limit_bytes(kind))
+
+
+async def _send_oversized_notice(
+    sender: TelegramSender,
+    tg_user_id: int,
+    header_text: str,
+    reply_markup=None,
+) -> None:
+    await sender.send(tg_user_id, f"{header_text}\n<i>[{OVERSIZED_NOTICE}]</i>", reply_markup=reply_markup)
 
 
 def _looks_like_video(data: bytes) -> bool:
@@ -108,7 +147,7 @@ async def _download_video_with_fallback(attach: dict, client: MaxClient) -> tupl
     for url in urls:
         if not url or url == thumb:
             continue
-        data = await client.download_file(url)
+        data = await _download_limited(client, url, "video")
         if _looks_like_video(data or b""):
             return data, _guess_filename_from_url(url, "video.mp4")
 
@@ -129,19 +168,23 @@ async def _prepare_album_item(attach: dict, client: MaxClient) -> dict | None:
         url = _extract_photo_url(attach)
         if not url:
             return None
-        data = await client.download_file(url)
+        if _is_oversized(attach, "photo"):
+            return None
+        data = await _download_limited(client, url, "photo")
         if not data:
             return None
         return {"kind": "photo", "data": data, "filename": "photo.jpg"}
 
     if atype == "VIDEO":
+        if _is_oversized(attach, "video"):
+            return None
         data, filename = await _download_video_with_fallback(attach, client)
         if data:
             return {"kind": "video", "data": data, "filename": filename}
         thumb = attach.get("thumbnail")
         if not thumb:
             return None
-        data = await client.download_file(thumb)
+        data = await _download_limited(client, thumb, "photo")
         if not data:
             return None
         return {"kind": "photo", "data": data, "filename": "video_preview.jpg"}
@@ -154,7 +197,9 @@ async def _prepare_album_item(attach: dict, client: MaxClient) -> dict | None:
         kind = _guess_media_kind(name)
         if kind not in ("photo", "video"):
             return None
-        data = await client.download_file(token_url)
+        if _is_oversized(attach, kind):
+            return None
+        data = await _download_limited(client, token_url, kind)
         if not data:
             return None
         return {"kind": kind, "data": data, "filename": name}
@@ -178,6 +223,14 @@ async def _send_attaches(
         else:
             await sender.send(tg_user_id, f"{header_text}\n<i>[без содержимого]</i>", reply_markup=kb)
         return
+    skipped_count = max(0, len(meaningful_attaches) - MAX_ATTACHMENTS_PER_MESSAGE)
+    if skipped_count:
+        log.warning(
+            "Message has too many attachments; processing first %d skipped=%d",
+            MAX_ATTACHMENTS_PER_MESSAGE,
+            skipped_count,
+        )
+        meaningful_attaches = meaningful_attaches[:MAX_ATTACHMENTS_PER_MESSAGE]
 
     album_candidates: list[dict] = []
     album_indexes: list[int] = []
@@ -208,6 +261,11 @@ async def _send_attaches(
             cap = caption
         await _send_attach(attach, client, sender, tg_user_id, cap, kb=kb)
         log.debug("Forwarded attach _type=%s -> TG", attach.get("_type"))
+    if skipped_count:
+        await sender.send(
+            tg_user_id,
+            f"{header_text}\n<i>[пропущено вложений сверх лимита: {skipped_count}]</i>",
+        )
 
 
 async def _send_attach(
@@ -230,14 +288,20 @@ async def _send_attach(
         if not url:
             log.warning("PHOTO attach has no URL; keys=%s", list(attach.keys()))
             return False
-        data = await client.download_file(url)
+        if _is_oversized(attach, "photo"):
+            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            return True
+        data = await _download_limited(client, url, "photo")
         if data:
             await sender.send_photo(tg_user_id, data, caption=header_text, reply_markup=kb)
             return True
-        await sender.send(tg_user_id, f"{header_text}\n<i>[фото — не удалось загрузить]</i>", reply_markup=kb)
+        await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
         return True
 
     if atype == "VIDEO":
+        if _is_oversized(attach, "video"):
+            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            return True
         data, filename = await _download_video_with_fallback(attach, client)
         if data:
             sent = await sender.send_video(tg_user_id, data, caption=header_text, filename=filename, reply_markup=kb)
@@ -246,23 +310,26 @@ async def _send_attach(
             log.warning("Failed to send VIDEO as video, falling back to preview")
         thumb = attach.get("thumbnail")
         if thumb:
-            data = await client.download_file(thumb)
+            data = await _download_limited(client, thumb, "photo")
             if data:
                 await sender.send_photo(
                     tg_user_id, data, caption=f"{header_text}\n<i>[видео — превью]</i>", reply_markup=kb
                 )
                 return True
-        await sender.send(tg_user_id, f"{header_text}\n<i>[видео]</i>", reply_markup=kb)
+        await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
         return True
 
     if atype == "FILE":
         name = attach.get("name", "file")
-        size = attach.get("size", 0)
+        size = _attachment_declared_size(attach)
         token_url = _extract_file_url(attach)
         if token_url:
-            data = await client.download_file(token_url)
+            kind = _guess_media_kind(name)
+            if _is_oversized(attach, kind):
+                await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+                return True
+            data = await _download_limited(client, token_url, kind)
             if data:
-                kind = _guess_media_kind(name)
                 if kind == "photo":
                     await sender.send_photo(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
                 elif kind == "video":
@@ -272,6 +339,8 @@ async def _send_attach(
                 else:
                     await sender.send_document(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
                 return True
+            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            return True
         size_str = f" ({_human_size(size)})" if size else ""
         await sender.send(tg_user_id, f"{header_text}\n📎 <b>{escape(name)}</b>{size_str}", reply_markup=kb)
         return True
@@ -279,20 +348,30 @@ async def _send_attach(
     if atype == "AUDIO":
         url = attach.get("url")
         if url:
-            data = await client.download_file(url)
+            if _is_oversized(attach, "document"):
+                await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+                return True
+            data = await _download_limited(client, url, "document")
             if data:
                 await sender.send_voice(tg_user_id, data, caption=header_text, reply_markup=kb)
                 return True
+            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            return True
         await sender.send(tg_user_id, f"{header_text}\n<i>[аудио]</i>", reply_markup=kb)
         return True
 
     if atype == "STICKER":
         url = attach.get("url")
         if url:
-            data = await client.download_file(url)
+            if _is_oversized(attach, "photo"):
+                await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+                return True
+            data = await _download_limited(client, url, "photo")
             if data:
                 await sender.send_sticker(tg_user_id, data, reply_markup=kb)
                 return True
+            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            return True
         await sender.send(tg_user_id, f"{header_text}\n<i>[стикер]</i>", reply_markup=kb)
         return True
 

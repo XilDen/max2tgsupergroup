@@ -21,6 +21,10 @@ LOG_BACKUP_COUNT = 3
 
 BACKUP_INTERVAL_SEC = 7 * 24 * 60 * 60
 BACKUP_KEEP_COUNT = 4
+CACHE_CLEANUP_INTERVAL_SEC = 6 * 60 * 60
+CACHE_MAX_AGE_SEC = 24 * 60 * 60
+CACHE_DIR_NAMES = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache")
+CACHE_FILE_PATTERNS = ("*.pyc", "*.pyo")
 
 
 class _DbOnlyFilter(logging.Filter):
@@ -198,3 +202,96 @@ async def weekly_backup_loop(
                 log.info("Weekly DB backup created: %s", backup_path)
         except Exception:
             log.exception("Weekly DB backup failed")
+
+
+def _is_within(root: Path, target: Path) -> bool:
+    try:
+        target.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _remove_tree_if_safe(root: Path, path: Path) -> None:
+    if not _is_within(root, path):
+        raise ValueError(f"Refusing to remove outside workspace: {path}")
+    if not path.exists():
+        return
+    for child in path.iterdir():
+        if child.is_dir():
+            _remove_tree_if_safe(root, child)
+        else:
+            child.unlink(missing_ok=True)
+    path.rmdir()
+
+
+def cleanup_runtime_cache_once(
+    root_dir: str = ".",
+    max_age_sec: int = CACHE_MAX_AGE_SEC,
+    remove_backups: bool = False,
+) -> int:
+    root = Path(root_dir).resolve()
+    cutoff = app_now().timestamp() - max(0, int(max_age_sec))
+    removed = 0
+
+    for dir_name in CACHE_DIR_NAMES:
+        for path in root.rglob(dir_name):
+            if not path.is_dir():
+                continue
+            try:
+                newest_mtime = max((p.stat().st_mtime for p in path.rglob("*") if p.exists()), default=path.stat().st_mtime)
+                if newest_mtime > cutoff:
+                    continue
+                _remove_tree_if_safe(root, path)
+                removed += 1
+            except Exception:
+                log.exception("Failed to remove cache directory: %s", path)
+
+    for pattern in CACHE_FILE_PATTERNS:
+        for path in root.rglob(pattern):
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime > cutoff:
+                    continue
+                if not _is_within(root, path):
+                    continue
+                path.unlink(missing_ok=True)
+                removed += 1
+            except Exception:
+                log.exception("Failed to remove cache file: %s", path)
+
+    if remove_backups:
+        backups_dir = root / "data" / "backups"
+        if backups_dir.exists():
+            try:
+                _remove_tree_if_safe(root, backups_dir)
+                removed += 1
+            except Exception:
+                log.exception("Failed to remove DB backups directory: %s", backups_dir)
+
+    return removed
+
+
+async def runtime_cache_cleanup_loop(
+    stop_event: asyncio.Event,
+    root_dir: str = ".",
+    remove_backups: bool = False,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            removed = await asyncio.to_thread(
+                cleanup_runtime_cache_once,
+                root_dir,
+                CACHE_MAX_AGE_SEC,
+                remove_backups,
+            )
+            if removed:
+                log.info("Runtime cache cleanup removed entries=%d", removed)
+        except Exception:
+            log.exception("Runtime cache cleanup failed")
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=CACHE_CLEANUP_INTERVAL_SEC)
+        except asyncio.TimeoutError:
+            pass

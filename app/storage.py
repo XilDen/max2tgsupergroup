@@ -12,6 +12,14 @@ from app.crypto_box import SecretBox
 from app.time_utils import DEFAULT_APP_TIMEZONE, app_today, format_app_datetime
 
 
+class DuplicateActiveAccountBindingError(Exception):
+    pass
+
+
+class MaxActiveAccountLimitError(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class MaxAccountRecord:
     id: int
@@ -287,26 +295,72 @@ class Storage:
         max_device_id: str,
         title: str = "",
     ) -> MaxAccountRecord:
+        return await self.add_account_checked(
+            tg_user_id=tg_user_id,
+            max_token=max_token,
+            max_device_id=max_device_id,
+            title=title,
+            max_active_bindings=None,
+        )
+
+    async def add_account_checked(
+        self,
+        tg_user_id: int,
+        max_token: str,
+        max_device_id: str,
+        title: str = "",
+        max_active_bindings: int | None = None,
+    ) -> MaxAccountRecord:
         enc_token = self._box.encrypt(max_token)
         enc_device_id = self._box.encrypt(max_device_id)
         ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
-            cur = await db.execute(
-                """
-                INSERT INTO max_accounts (tg_user_id, max_token, max_device_id, title, is_active, created_at)
-                VALUES (?, ?, ?, ?, 1, ?)
-                """,
-                (tg_user_id, enc_token, enc_device_id, title, ts),
-            )
-            await db.commit()
-            acc_id = int(cur.lastrowid)
-            row_cur = await db.execute(
-                "SELECT * FROM max_accounts WHERE id = ?",
-                (acc_id,),
-            )
-            row = await row_cur.fetchone()
-            return self._row_to_account(row)
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                consent_cur = await db.execute(
+                    "SELECT 1 FROM tg_users WHERE tg_user_id = ? AND terms_accepted_at IS NOT NULL LIMIT 1",
+                    (tg_user_id,),
+                )
+                if await consent_cur.fetchone() is None:
+                    raise PermissionError("Terms are not accepted")
+
+                existing_cur = await db.execute(
+                    """
+                    SELECT * FROM max_accounts
+                    WHERE tg_user_id = ? AND is_active = 1
+                    ORDER BY id ASC
+                    """,
+                    (tg_user_id,),
+                )
+                existing_rows = await existing_cur.fetchall()
+                existing_accounts = [self._row_to_account(row) for row in existing_rows]
+                for existing in existing_accounts:
+                    if existing.max_device_id == max_device_id or existing.max_token == max_token:
+                        raise DuplicateActiveAccountBindingError("Active binding already exists for this user")
+                if max_active_bindings is not None and len(existing_accounts) >= max_active_bindings:
+                    raise MaxActiveAccountLimitError(
+                        f"Maximum active MAX bindings per user is {max_active_bindings}"
+                    )
+
+                cur = await db.execute(
+                    """
+                    INSERT INTO max_accounts (tg_user_id, max_token, max_device_id, title, is_active, created_at)
+                    VALUES (?, ?, ?, ?, 1, ?)
+                    """,
+                    (tg_user_id, enc_token, enc_device_id, title, ts),
+                )
+                acc_id = int(cur.lastrowid)
+                row_cur = await db.execute(
+                    "SELECT * FROM max_accounts WHERE id = ?",
+                    (acc_id,),
+                )
+                row = await row_cur.fetchone()
+                await db.commit()
+                return self._row_to_account(row)
+            except Exception:
+                await db.rollback()
+                raise
 
     async def _migrate_encrypt_account_secrets(self, db: aiosqlite.Connection) -> None:
         db.row_factory = aiosqlite.Row

@@ -10,14 +10,8 @@ services:
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ./data:/app/data
-    privileged: true
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes:
-      - redis-data:/data
-
-volumes:
-  redis-data:
+    command: ["redis-server", "--save", "", "--appendonly", "no"]

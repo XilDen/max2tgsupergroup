@@ -4,7 +4,7 @@ Guidance for Codex, Cursor, Claude Code and other AI/vibecoding agents working o
 
 ## Project Snapshot
 
-`max2tg` is an unofficial Python 3.12 service that forwards messages from Max (web.max.ru) to Telegram and can optionally send Telegram replies back to Max. It supports multiple Max accounts, SQLite storage, optional Redis-backed Telegram send queue, admin commands, daily reports, log rotation and weekly DB backups.
+`max2tg` is an unofficial Python 3.12 service that forwards messages from Max (web.max.ru) to Telegram and can optionally send Telegram replies back to Max. It supports multiple Max accounts, SQLite storage, optional Redis-backed Telegram send queue, admin commands, daily reports, log rotation and optional DB backups.
 
 Runtime flow:
 
@@ -32,6 +32,8 @@ Telegram commands/replies -> tg_commands -> AccountManager -> MaxClient
 - Repetitive WebSocket noise belongs in `DEBUG`: heartbeat, `<<< EVENT`, contact/chat lookup, resolved contacts, attachment processing, downloaded file.
 - Important lifecycle events can stay `INFO`: startup, account runtime start, Max connection/auth, reconnect, queue backend, forwarded message summary.
 - Keep transient Telegram polling network tracebacks suppressed via `maintenance._TransientTelegramPollingFilter`; do not suppress real handler errors.
+- Media/message payloads must not be persisted to disk. Keep relay bytes in memory/Redis only for delivery and TTL.
+- Enforce hard media download caps: 5MB for images/stickers/previews, 20MB for videos/documents/audio. Oversized user-facing text is `[вырезано так как файл слишком большой]`.
 
 ## Timezone Rules
 
@@ -69,7 +71,8 @@ Telegram commands/replies -> tg_commands -> AccountManager -> MaxClient
   - `send_media_group`
 - If a direct sender method returns a meaningful bool, the queued sender should mirror the caller contract as closely as possible. For queued sends, returning `True` means "accepted into queue", not "Telegram delivery confirmed".
 - Queue jobs enforce tenant isolation: `tenant_tg_user_id` must match `chat_id`.
-- Redis queue payloads are pickled Python objects; avoid adding non-pickleable values to queued kwargs.
+- Redis queue payloads use a JSON schema with base64 for bytes. Do not reintroduce pickle or other executable deserialization.
+- Redis queue storage is intended to be non-persistent. Docker Compose disables snapshots/AOF and does not mount a Redis data volume.
 
 ## Storage And Reports
 
@@ -78,6 +81,8 @@ Telegram commands/replies -> tg_commands -> AccountManager -> MaxClient
 - Daily metrics are calendar-day metrics in `APP_TIMEZONE`.
 - `/reports` is admin-facing and must keep using local app dates.
 - Existing DB defaults may contain `CURRENT_TIMESTAMP` for legacy fallback, but new code should pass timezone-aware timestamps explicitly.
+- Weekly DB backups are disabled by default (`DB_BACKUP_ENABLED=false`). Do not enable persistent backup copies unless the user explicitly accepts that encrypted account data will be copied to disk.
+- Runtime cache cleanup removes Python/test cache directories and stale `data/backups` when backups are disabled.
 
 ## Command And Admin UX Rules
 

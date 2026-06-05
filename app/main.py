@@ -10,7 +10,7 @@ from app.account_manager import AccountManager
 from app.config import load_settings
 from app.cooldown_store import MemoryCooldownStore
 from app.health_monitor import AppLogHealthMonitor
-from app.maintenance import configure_logging, weekly_backup_loop
+from app.maintenance import configure_logging, runtime_cache_cleanup_loop, weekly_backup_loop
 from app.message_queue import QueuedTelegramSender
 from app.storage import Storage
 from app.tg_handler import build_tg_app
@@ -143,13 +143,27 @@ async def main():
         log.exception("Failed to send startup notification to admin_id=%s", settings.tg_admin_id)
 
     backup_stop_event = asyncio.Event()
-    backup_task = asyncio.create_task(
-        weekly_backup_loop(
-            settings.db_path,
-            backup_stop_event,
-            timezone_name=settings.app_timezone,
+    backup_task = None
+    if settings.db_backup_enabled:
+        backup_task = asyncio.create_task(
+            weekly_backup_loop(
+                settings.db_path,
+                backup_stop_event,
+                timezone_name=settings.app_timezone,
+            ),
+            name="weekly-db-backup",
+        )
+    else:
+        log.info("Weekly DB backup disabled")
+
+    cache_stop_event = asyncio.Event()
+    cache_cleanup_task = asyncio.create_task(
+        runtime_cache_cleanup_loop(
+            cache_stop_event,
+            root_dir=".",
+            remove_backups=not settings.db_backup_enabled,
         ),
-        name="weekly-db-backup",
+        name="runtime-cache-cleanup",
     )
 
     try:
@@ -162,8 +176,12 @@ async def main():
         await asyncio.gather(health_task, return_exceptions=True)
         health_monitor.uninstall()
         backup_stop_event.set()
-        backup_task.cancel()
-        await asyncio.gather(backup_task, return_exceptions=True)
+        if backup_task:
+            backup_task.cancel()
+            await asyncio.gather(backup_task, return_exceptions=True)
+        cache_stop_event.set()
+        cache_cleanup_task.cancel()
+        await asyncio.gather(cache_cleanup_task, return_exceptions=True)
         await tg_app.updater.stop()
         await tg_app.stop()
         await tg_app.shutdown()

@@ -28,7 +28,8 @@
 - Поддержка нескольких MAX-аккаунтов одновременно
 - Легковесное хранение только реквизитов подключения и связки с Telegram-пользователем (SQLite)
 - Ротация логов: 1MB на файл, до 3 архивов
-- Еженедельный backup SQLite (хранится 4 последних копии)
+- Еженедельный backup SQLite опционален и по умолчанию выключен
+- Медиа не сохраняются на диск: файлы временно держатся только для ретрансляции, с жесткими лимитами 5MB для изображений и 20MB для остальных файлов
 - Очередь отправки в Telegram с воркерами и опциональным Redis backend для большого потока
 - Docker-ready: разворачивается одной командой
 
@@ -76,6 +77,7 @@ cp .env.example .env
 | `ENCRYPTION_KEY` | да | Секрет для шифрования `max_token` и `max_device_id` в SQLite |
 | `DB_PATH` | нет | Путь к SQLite БД (по умолчанию `data/max2tg.sqlite3`) |
 | `APP_TIMEZONE` | нет | Глобальный часовой пояс для логов, отчетов, backup-имен и админских событий (по умолчанию `Europe/Moscow`) |
+| `DB_BACKUP_ENABLED` | нет | `true` — включить еженедельные backup-копии SQLite на диск (по умолчанию выключено) |
 | `REDIS_URL` | нет | URL Redis для внешней очереди отправки (по умолчанию `redis://127.0.0.1:6379/0`; в Docker Compose переопределяется на `redis://redis:6379/0`) |
 | `REDIS_KEY_PREFIX` | нет | Глобальный префикс ключей Redis (по умолчанию `max2tg`) |
 | `TG_QUEUE_WORKERS` | нет | Количество воркеров отправки в TG |
@@ -187,7 +189,7 @@ docker compose down
 REDIS_URL=redis://redis:6379/0
 ```
 
-SQLite вынесена в bind-mount `./data:/app/data`, поэтому база не теряется при пересборке контейнера.
+SQLite вынесена в bind-mount `./data:/app/data`, поэтому база не теряется при пересборке контейнера. Redis в Compose запущен без AOF/snapshot и без volume: очередь и временные медиа-байты не пишутся в Redis-хранилище на диск.
 
 ## Как это работает
 
@@ -241,7 +243,8 @@ Real-time message forwarding from **Max** messenger (max.ru) to **Telegram** —
 - Multiple MAX accounts at the same time
 - Lightweight storage for account credentials and MAX↔Telegram user bindings only (SQLite)
 - Log rotation: 1MB per file, up to 3 rotated files
-- Weekly SQLite backup (keeps last 4 copies)
+- Optional weekly SQLite backup (disabled by default)
+- Media is not persisted to disk: files are held only temporarily for relay, with hard caps of 5MB for images and 20MB for other files
 - Telegram outbound queue with workers and optional Redis backend for high throughput
 - Docker-ready: deploy with a single command
 
@@ -289,6 +292,7 @@ cp .env.example .env
 | `ENCRYPTION_KEY` | yes | Secret used to encrypt `max_token` and `max_device_id` in SQLite |
 | `DB_PATH` | no | SQLite path (default `data/max2tg.sqlite3`) |
 | `APP_TIMEZONE` | no | Global timezone for logs, reports, backup names, and admin-visible event times (default `Europe/Moscow`) |
+| `DB_BACKUP_ENABLED` | no | `true` — enable weekly SQLite backup copies on disk (disabled by default) |
 | `REDIS_URL` | no | Redis URL for outbound queue backend (default `redis://127.0.0.1:6379/0`; overridden to `redis://redis:6379/0` in Docker Compose) |
 | `REDIS_KEY_PREFIX` | no | Global Redis key prefix (default `max2tg`) |
 | `TG_QUEUE_WORKERS` | no | Number of TG sender workers |
@@ -400,7 +404,7 @@ docker compose down
 REDIS_URL=redis://redis:6379/0
 ```
 
-SQLite is persisted via bind mount `./data:/app/data`, so DB data survives container rebuilds.
+SQLite is persisted via bind mount `./data:/app/data`, so DB data survives container rebuilds. Compose Redis runs without AOF/snapshots and without a volume, so queued jobs and temporary media bytes are not written to Redis disk storage.
 
 ## How It Works
 

@@ -749,7 +749,7 @@ async def _on_reply_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data[PENDING_REPLY_LABEL_KEY] = label
 
     await query.message.reply_text(
-        f"✏️ Напишите ответ для <b>{label}</b>:\n"
+        f"✏️ Напишите ответ для <b>{escape(label)}</b>:\n"
         "<i>(или /cancel для отмены)</i>",
         parse_mode="HTML",
     )
@@ -795,8 +795,9 @@ async def _on_text_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_metric=reply_metric,
             )
             if ok:
+                safe_label = escape(str(label or max_chat_id))
                 await update.message.reply_text(
-                    f"✅ Отправлено -> <b>{label or max_chat_id}</b>",
+                    f"✅ Отправлено -> <b>{safe_label}</b>",
                     parse_mode="HTML",
                 )
             else:

@@ -20,6 +20,7 @@ class Settings:
     tg_queue_job_ttl_sec: int
     encryption_key: str
     app_timezone: str
+    db_backup_enabled: bool = False
     debug: bool = False
     reply_enabled: bool = False
 
@@ -54,6 +55,7 @@ def load_settings() -> Settings:
         tg_queue_job_ttl_sec=int(os.environ.get("TG_QUEUE_JOB_TTL_SEC", "300")),
         encryption_key=os.environ["ENCRYPTION_KEY"],
         app_timezone=app_timezone,
+        db_backup_enabled=os.environ.get("DB_BACKUP_ENABLED", "").lower() in ("1", "true", "yes"),
         debug=os.environ.get("DEBUG", "").lower() in ("1", "true", "yes"),
         reply_enabled=os.environ.get("REPLY_ENABLED", "").lower() in ("1", "true", "yes"),
     )

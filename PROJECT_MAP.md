@@ -29,7 +29,7 @@ Telegram command/reply
 
 - `app/main.py`
   - Runtime entry point.
-  - Loads settings, configures logging, initializes storage, starts Telegram transport/queue, starts Max account runtimes, starts polling and backup/health loops.
+  - Loads settings, configures logging, initializes storage, starts Telegram transport/queue, starts Max account runtimes, starts polling, health loop, optional backup loop and runtime cache cleanup.
   - Legacy bootstrap from `MAX_TOKEN` + `MAX_DEVICE_ID` + `TG_CHAT_ID` lives here.
 
 - `app/config.py`
@@ -47,6 +47,7 @@ Telegram command/reply
 - `app/max_client.py`
   - Low-level Max WebSocket client and protocol opcodes.
   - Handles handshake/auth, reconnects, heartbeats, RPC commands, file downloads and message parsing.
+  - Enforces download caps: 5MB images/previews/stickers, 20MB other files.
   - `validate_max_credentials()` returns `True`, `False`, or `None`.
   - `account_id` is included in logs because multiple clients run concurrently.
   - Dispatch handler tasks are observed to avoid unhandled `asyncio` task exceptions.
@@ -54,6 +55,7 @@ Telegram command/reply
 - `app/max_listener.py`
   - Converts parsed Max messages into Telegram messages/media.
   - Formats headers, handles attachments, albums, forwards/replies, media fallback.
+  - Keeps media relay in memory only and sends `[вырезано так как файл слишком большой]` for oversized attachments.
   - Updates daily report metrics via callback.
   - Builds reply keyboards only when replies are enabled and the source chat is not a channel.
   - Must not log raw names/text/URLs/payloads.
@@ -74,6 +76,7 @@ Telegram command/reply
 - `app/message_queue.py`
   - Async queued wrapper around `TelegramSender`.
   - Local memory queue by default, optional Redis backend.
+  - Redis payloads are JSON/base64, not pickle, and are intended for volatile delivery queues only.
   - Preserves tenant isolation by checking queued `chat_id` against `tenant_tg_user_id`.
   - Must mirror direct sender methods used by `max_listener`, including `send_media_group()`.
 
@@ -117,7 +120,8 @@ Telegram command/reply
   - Logging setup, log rotation, app timezone formatter.
   - Splits app logs and DB logs with filters.
   - Suppresses transient Telegram polling network tracebacks.
-  - Weekly SQLite backup loop.
+  - Optional weekly SQLite backup loop, disabled by default.
+  - Runtime cache cleanup loop for Python/test caches and stale `data/backups` when backups are disabled.
 
 - `app/health_monitor.py`
   - Captures app-level ERROR records.
@@ -139,6 +143,7 @@ Telegram command/reply
 
 - `docker-compose.yml`
   - Runs app + Redis. Mounts `./data` to persist SQLite.
+  - Redis persistence is disabled (`--save "" --appendonly no`) so queued media bytes are not written to Redis disk storage.
 
 - `README.md`
   - Human setup and usage instructions in Russian and English.
@@ -187,6 +192,7 @@ Use `INFO` for:
 - runtime start/stop summaries
 - successful high-level forwarding summary
 - backup success/failure
+- cache cleanup summaries
 
 Use `DEBUG` for:
 
@@ -212,6 +218,7 @@ Use `ERROR`/`exception` for:
 - unexpected message handler failures
 - DB/report write failures
 - backup failures
+- cache cleanup failures
 
 ## Important Invariants
 
@@ -223,6 +230,9 @@ Use `ERROR`/`exception` for:
 - Keep daily reports and admin timestamps in `APP_TIMEZONE`.
 - Preserve encrypted storage for Max credentials.
 - Keep Telegram queue tenant isolation check.
+- Do not persist message/media payloads to disk.
+- Keep Redis queue serialization non-executable and non-persistent.
+- Keep media download limits at 5MB images / 20MB other files unless the user explicitly changes the policy.
 
 ## Quick Verification Checklist
 

@@ -11,6 +11,11 @@ import aiohttp
 
 log = logging.getLogger(__name__)
 
+MAX_IMAGE_DOWNLOAD_BYTES = 5 * 1024 * 1024
+MAX_FILE_DOWNLOAD_BYTES = 20 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = MAX_FILE_DOWNLOAD_BYTES
+DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -422,7 +427,7 @@ class MaxClient:
         log.info("send_message account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
         return resp
 
-    async def download_file(self, url: str) -> bytes | None:
+    async def download_file(self, url: str, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes | None:
         """Download a file by URL, returning raw bytes or None on failure."""
         session = getattr(self, "_session", None)
         close_after = False
@@ -435,9 +440,30 @@ class MaxClient:
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.read()
+                    try:
+                        declared_size = int(resp.headers.get("Content-Length") or 0)
+                    except ValueError:
+                        declared_size = 0
+                    if declared_size > max_bytes:
+                        log.warning(
+                            "Download skipped account=%s bytes=%d limit=%d",
+                            self.account_id,
+                            declared_size,
+                            max_bytes,
+                        )
+                        return None
+                    data = bytearray()
+                    async for chunk in resp.content.iter_chunked(DOWNLOAD_CHUNK_BYTES):
+                        if len(data) + len(chunk) > max_bytes:
+                            log.warning(
+                                "Download aborted account=%s bytes>%d",
+                                self.account_id,
+                                max_bytes,
+                            )
+                            return None
+                        data.extend(chunk)
                     log.debug("Downloaded file account=%s bytes=%d", self.account_id, len(data))
-                    return data
+                    return bytes(data)
                 log.warning("Download failed account=%s HTTP %d", self.account_id, resp.status)
         except Exception:
             log.exception("Download error account=%s", self.account_id)

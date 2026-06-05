@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
 from app.max_client import validate_max_credentials
 from app.max_listener import create_max_client
-from app.storage import DailyReportRow, MaxAccountRecord, Storage, TgUserRecord
+from app.storage import (
+    DailyReportRow,
+    DuplicateActiveAccountBindingError,
+    MaxAccountRecord,
+    MaxActiveAccountLimitError,
+    Storage,
+    TgUserRecord,
+)
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +51,10 @@ class AccountManager:
         self._reply_enabled = reply_enabled
         self._runtimes: dict[int, AccountRuntime] = {}
         self._lock = asyncio.Lock()
+        self._user_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    def _user_lock(self, tg_user_id: int) -> asyncio.Lock:
+        return self._user_locks[int(tg_user_id)]
 
     async def start_all(self) -> None:
         for record in await self._storage.list_all_active_accounts():
@@ -68,45 +80,40 @@ class AccountManager:
         max_device_id: str,
         title: str = "",
     ) -> MaxAccountRecord:
-        if not await self._storage.has_terms_consent(tg_user_id):
-            raise PermissionError("Terms are not accepted")
-        existing_accounts = await self._storage.list_accounts_for_user(tg_user_id)
-        for existing in existing_accounts:
-            # Prevent duplicate active binding for the same user.
-            if existing.max_device_id == max_device_id or existing.max_token == max_token:
-                raise DuplicateActiveBindingError("Active binding already exists for this user")
-        if len(existing_accounts) >= self.MAX_ACTIVE_BINDINGS_PER_USER:
-            raise MaxBindingsLimitError(
-                f"Maximum active MAX bindings per user is {self.MAX_ACTIVE_BINDINGS_PER_USER}"
-            )
-        user = await self._storage.get_user(tg_user_id)
-        if user is None:
-            await self._storage.ensure_user(tg_user_id)
-        record = await self._storage.add_account(
-            tg_user_id=tg_user_id,
-            max_token=max_token,
-            max_device_id=max_device_id,
-            title=title,
-        )
-        await self._start_record(record)
-        return record
+        async with self._user_lock(tg_user_id):
+            try:
+                record = await self._storage.add_account_checked(
+                    tg_user_id=tg_user_id,
+                    max_token=max_token,
+                    max_device_id=max_device_id,
+                    title=title,
+                    max_active_bindings=self.MAX_ACTIVE_BINDINGS_PER_USER,
+                )
+            except DuplicateActiveAccountBindingError as exc:
+                raise DuplicateActiveBindingError(str(exc)) from exc
+            except MaxActiveAccountLimitError as exc:
+                raise MaxBindingsLimitError(str(exc)) from exc
+            await self._start_record(record)
+            return record
 
     async def remove_account(self, account_id: int, tg_user_id: int) -> bool:
-        removed = await self._storage.deactivate_account(account_id, tg_user_id)
-        if not removed:
-            return False
-        await self._stop_runtime(account_id)
-        return True
+        async with self._user_lock(tg_user_id):
+            removed = await self._storage.deactivate_account(account_id, tg_user_id)
+            if not removed:
+                return False
+            await self._stop_runtime(account_id)
+            return True
 
     async def remove_all_accounts_for_user(self, tg_user_id: int) -> int:
-        accounts = await self._storage.list_accounts_for_user(tg_user_id)
-        removed_count = 0
-        for account in accounts:
-            removed = await self._storage.deactivate_account(account.id, tg_user_id)
-            if removed:
-                removed_count += 1
-                await self._stop_runtime(account.id)
-        return removed_count
+        async with self._user_lock(tg_user_id):
+            accounts = await self._storage.list_accounts_for_user(tg_user_id)
+            removed_count = 0
+            for account in accounts:
+                removed = await self._storage.deactivate_account(account.id, tg_user_id)
+                if removed:
+                    removed_count += 1
+                    await self._stop_runtime(account.id)
+            return removed_count
 
     async def list_accounts_for_user(self, tg_user_id: int) -> list[MaxAccountRecord]:
         return await self._storage.list_accounts_for_user(tg_user_id)
@@ -122,18 +129,20 @@ class AccountManager:
         return await self._storage.ensure_user(tg_user_id)
 
     async def activate_user(self, tg_user_id: int) -> TgUserRecord:
-        if not await self._storage.has_terms_consent(tg_user_id):
-            raise PermissionError("Terms are not accepted")
-        return await self._storage.activate_user(tg_user_id)
+        async with self._user_lock(tg_user_id):
+            if not await self._storage.has_terms_consent(tg_user_id):
+                raise PermissionError("Terms are not accepted")
+            return await self._storage.activate_user(tg_user_id)
 
     async def deactivate_user(self, tg_user_id: int) -> tuple[TgUserRecord, int]:
-        if not await self._storage.has_terms_consent(tg_user_id):
-            raise PermissionError("Terms are not accepted")
-        account_ids = await self._storage.delete_accounts_for_user(tg_user_id)
-        for account_id in account_ids:
-            await self._stop_runtime(account_id)
-        user = await self._storage.deactivate_user(tg_user_id)
-        return user, len(account_ids)
+        async with self._user_lock(tg_user_id):
+            if not await self._storage.has_terms_consent(tg_user_id):
+                raise PermissionError("Terms are not accepted")
+            account_ids = await self._storage.delete_accounts_for_user(tg_user_id)
+            for account_id in account_ids:
+                await self._stop_runtime(account_id)
+            user = await self._storage.deactivate_user(tg_user_id)
+            return user, len(account_ids)
 
     async def list_users_page(self, page: int = 1, page_size: int = 10) -> tuple[list[TgUserRecord], int]:
         return await self._storage.list_users_page(page=page, page_size=page_size)
@@ -153,20 +162,21 @@ class AccountManager:
         text: str,
         reply_metric: str | None = None,
     ) -> bool:
-        record = await self._storage.get_account(account_id)
-        if not record or not record.is_active or record.tg_user_id != tg_user_id:
-            return False
-        runtime = self._runtimes.get(account_id)
-        if not runtime:
-            return False
-        resp = await runtime.client.send_message(max_chat_id, text)
-        ok = bool(resp)
-        if ok and reply_metric:
-            try:
-                await self._storage.increment_daily_metric(reply_metric)
-            except Exception:
-                log.exception("Failed to write report metric=%s", reply_metric)
-        return ok
+        async with self._user_lock(tg_user_id):
+            record = await self._storage.get_account(account_id)
+            if not record or not record.is_active or record.tg_user_id != tg_user_id:
+                return False
+            runtime = self._runtimes.get(account_id)
+            if not runtime:
+                return False
+            resp = await runtime.client.send_message(max_chat_id, text)
+            ok = bool(resp)
+            if ok and reply_metric:
+                try:
+                    await self._storage.increment_daily_metric(reply_metric)
+                except Exception:
+                    log.exception("Failed to write report metric=%s", reply_metric)
+            return ok
 
     async def get_daily_report(self, days: int = 10) -> list[DailyReportRow]:
         return await self._storage.get_daily_report(days=days)

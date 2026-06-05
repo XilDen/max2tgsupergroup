@@ -1,14 +1,118 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
-import pickle
 import time
 from typing import Any
+
+from telegram import InlineKeyboardMarkup
 
 from app.tg_sender import TelegramSender
 
 log = logging.getLogger(__name__)
+
+_JOB_SCHEMA_VERSION = 1
+_TYPE_KEY = "__max2tg_type__"
+_ALLOWED_QUEUE_METHODS = {
+    "send",
+    "send_photo",
+    "send_document",
+    "send_video",
+    "send_voice",
+    "send_sticker",
+    "send_media_group",
+}
+
+
+def _encode_queue_value(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {
+            _TYPE_KEY: "bytes",
+            "data": base64.b64encode(value).decode("ascii"),
+        }
+    if isinstance(value, bytearray):
+        return _encode_queue_value(bytes(value))
+    if isinstance(value, InlineKeyboardMarkup):
+        return {
+            _TYPE_KEY: "inline_keyboard_markup",
+            "data": _encode_queue_value(value.to_dict()),
+        }
+    if isinstance(value, list):
+        return [_encode_queue_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_encode_queue_value(item) for item in value]
+    if isinstance(value, dict):
+        if _TYPE_KEY in value:
+            raise ValueError(f"Queue payload uses reserved key: {_TYPE_KEY}")
+        encoded: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"Queue payload dict key must be str, got {type(key).__name__}")
+            encoded[key] = _encode_queue_value(item)
+        return encoded
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"Unsupported queue payload value type: {type(value).__name__}")
+
+
+def _decode_queue_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_decode_queue_value(item) for item in value]
+    if isinstance(value, dict):
+        marker = value.get(_TYPE_KEY)
+        if marker == "bytes":
+            raw = value.get("data")
+            if not isinstance(raw, str):
+                raise ValueError("Invalid queue bytes payload")
+            return base64.b64decode(raw.encode("ascii"), validate=True)
+        if marker == "inline_keyboard_markup":
+            data = _decode_queue_value(value.get("data"))
+            if not isinstance(data, dict):
+                raise ValueError("Invalid inline keyboard payload")
+            return InlineKeyboardMarkup.de_json(data, None)
+        if marker:
+            raise ValueError(f"Unsupported queue payload marker: {marker}")
+        return {key: _decode_queue_value(item) for key, item in value.items()}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"Unsupported decoded queue payload value type: {type(value).__name__}")
+
+
+def _serialize_job(job: dict[str, Any]) -> bytes:
+    method = job.get("method")
+    if method not in _ALLOWED_QUEUE_METHODS:
+        raise ValueError(f"Unsupported queued Telegram method: {method}")
+    payload = {
+        "schema": _JOB_SCHEMA_VERSION,
+        "method": method,
+        "kwargs": _encode_queue_value(job.get("kwargs") or {}),
+        "attempt": int(job.get("attempt", 0)),
+        "enqueued_at": float(job.get("enqueued_at", 0.0)),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize_job(payload: bytes) -> dict[str, Any]:
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid queued Telegram job encoding") from exc
+    if not isinstance(raw, dict) or raw.get("schema") != _JOB_SCHEMA_VERSION:
+        raise ValueError("Unsupported queued Telegram job schema")
+    method = raw.get("method")
+    if method not in _ALLOWED_QUEUE_METHODS:
+        raise ValueError(f"Unsupported queued Telegram method: {method}")
+    kwargs = _decode_queue_value(raw.get("kwargs") or {})
+    if not isinstance(kwargs, dict):
+        raise ValueError("Queued Telegram kwargs must be a dict")
+    return {
+        "method": method,
+        "kwargs": kwargs,
+        "attempt": int(raw.get("attempt", 0)),
+        "enqueued_at": float(raw.get("enqueued_at", 0.0)),
+    }
 
 
 class _LocalQueueBackend:
@@ -63,7 +167,7 @@ class _RedisQueueBackend:
             self._redis = None
 
     async def put(self, job: dict[str, Any]) -> None:
-        payload = pickle.dumps(job, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = _serialize_job(job)
         await self._redis.rpush(self._queue_key, payload)
 
     async def get(self) -> tuple[dict[str, Any], bytes]:
@@ -74,7 +178,12 @@ class _RedisQueueBackend:
                 timeout=1,
             )
             if payload:
-                job = pickle.loads(payload)
+                try:
+                    job = _deserialize_job(payload)
+                except ValueError:
+                    log.exception("Dropping invalid Telegram queue job payload")
+                    await self._redis.lrem(self._processing_key, 1, payload)
+                    continue
                 if self._is_expired(job):
                     await self._redis.lrem(self._processing_key, 1, payload)
                     continue
@@ -93,7 +202,7 @@ class _RedisQueueBackend:
             return
         if delay_sec > 0:
             await asyncio.sleep(delay_sec)
-        payload = pickle.dumps(retry_job, protocol=pickle.HIGHEST_PROTOCOL)
+        payload = _serialize_job(retry_job)
         pipe = self._redis.pipeline(transaction=True)
         pipe.lrem(self._processing_key, 1, token)
         pipe.rpush(self._queue_key, payload)
@@ -105,7 +214,12 @@ class _RedisQueueBackend:
             payload = await self._redis.rpoplpush(self._processing_key, self._queue_key)
             if payload is None:
                 break
-            job = pickle.loads(payload)
+            try:
+                job = _deserialize_job(payload)
+            except ValueError:
+                log.exception("Dropping invalid Telegram processing queue job payload")
+                await self._redis.lrem(self._queue_key, 1, payload)
+                continue
             if self._is_expired(job):
                 await self._redis.lrem(self._queue_key, 1, payload)
                 continue
@@ -178,6 +292,8 @@ class QueuedTelegramSender:
             await self._redis_backend.stop()
 
     async def _enqueue(self, method: str, **kwargs) -> None:
+        if method not in _ALLOWED_QUEUE_METHODS:
+            raise ValueError(f"Unsupported queued Telegram method: {method}")
         job = {"method": method, "kwargs": kwargs, "attempt": 0, "enqueued_at": time.time()}
         await self._backend.put(job)
 
