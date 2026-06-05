@@ -346,7 +346,8 @@ class MaxClient:
             if self._on_message_cb:
                 msg = self._parse_message(payload)
                 if msg:
-                    asyncio.create_task(self._on_message_cb(msg))
+                    task = asyncio.create_task(self._on_message_cb(msg))
+                    task.add_done_callback(self._log_message_task_result)
 
         elif op in (OpCode.HEARTBEAT_PING,):
             log.debug("Heartbeat account=%s op=%s", self.account_id, op)
@@ -391,6 +392,21 @@ class MaxClient:
             timeout_log_level=logging.DEBUG,
         )
         return resp or {}
+
+    def _log_message_task_result(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception:
+            log.exception("Failed to inspect message handler task account=%s", self.account_id)
+            return
+        if exc is not None:
+            log.error(
+                "Message handler failed account=%s",
+                self.account_id,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
 
     async def send_message(self, chat_id, text: str) -> dict:
         """Send a text message to a Max chat. Returns the server response."""

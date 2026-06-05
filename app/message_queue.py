@@ -288,7 +288,7 @@ class QueuedTelegramSender:
         caption: str = "",
         filename: str = "video.mp4",
         reply_markup=None,
-    ) -> None:
+    ) -> bool:
         await self._enqueue(
             "send_video",
             chat_id=chat_id,
@@ -298,6 +298,7 @@ class QueuedTelegramSender:
             reply_markup=reply_markup,
             tenant_tg_user_id=chat_id,
         )
+        return True
 
     async def send_voice(self, chat_id: int, data: bytes, caption: str = "", reply_markup=None) -> None:
         await self._enqueue(
@@ -317,3 +318,18 @@ class QueuedTelegramSender:
             reply_markup=reply_markup,
             tenant_tg_user_id=chat_id,
         )
+
+    async def send_media_group(
+        self,
+        chat_id: int,
+        items: list[dict],
+        caption: str = "",
+    ) -> bool:
+        await self._enqueue(
+            "send_media_group",
+            chat_id=chat_id,
+            items=items,
+            caption=caption,
+            tenant_tg_user_id=chat_id,
+        )
+        return True
