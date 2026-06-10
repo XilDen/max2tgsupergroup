@@ -234,9 +234,10 @@ class TelegramSender:
         media = []
         for i, item in enumerate(items):
             data = item["data"]
-            filename = item.get("filename") or (
+            base_filename = item.get("filename") or (
                 "photo.jpg" if item["kind"] == "photo" else "video.mp4"
             )
+            filename = f"{i}_{base_filename}"
             media_file = InputFile(io.BytesIO(data), filename=filename)
             media_caption = first_caption if i == 0 and first_caption else None
 

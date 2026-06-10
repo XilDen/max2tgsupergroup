@@ -475,6 +475,8 @@ def create_max_client(
     client = MaxClient(token=max_token, device_id=max_device_id, debug=debug, account_id=account_id)
     resolver = ContactResolver(client=client)
 
+    _recent_messages = []
+
     @client.on_ready
     async def handle_ready(snapshot: dict):
         participant_ids = resolver.load_snapshot(snapshot)
@@ -493,6 +495,14 @@ def create_max_client(
 
     @client.on_message
     async def handle_message(msg: MaxMessage):
+        msg_sig = msg.message_id or f"{msg.chat_id}_{msg.timestamp}_{hash(msg.text)}"
+        if msg_sig in _recent_messages:
+            log.info("Skipped duplicate message account=%s sig=%s", account_id, msg_sig)
+            return
+        _recent_messages.append(msg_sig)
+        if len(_recent_messages) > 1000:
+            _recent_messages.pop(0)
+
         log.info(
             "New message account=%s chat=%s sender=%s is_self=%s attaches=%d",
             account_id,
