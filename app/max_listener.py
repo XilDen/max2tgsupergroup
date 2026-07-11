@@ -218,7 +218,7 @@ async def _send_attaches(
     client: MaxClient,
     sender: TelegramSender,
     chat_id: int,
-    =None,
+    kb=None,
     message_thread_id: int | None = None,
 ) -> None:
     meaningful_attaches = _meaningful_attaches(attaches)
