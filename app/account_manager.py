@@ -218,3 +218,30 @@ class AccountManager:
             log.exception("Failed to stop MAX runtime account=%s", account_id)
         runtime.task.cancel()
         await asyncio.gather(runtime.task, return_exceptions=True)
+    
+    async def send_media(
+        self,
+        account_id: int,
+        tg_user_id: int,
+        max_chat_id,
+        file_bytes: bytes,
+        filename: str,
+        caption: str = "",
+        reply_metric: str | None = None,
+    ) -> bool:
+        """Отправляет медиафайл в Max."""
+        async with self._user_lock(tg_user_id):
+            record = await self._storage.get_account(account_id)
+            if not record or not record.is_active or record.tg_user_id != tg_user_id:
+                return False
+            runtime = self._runtimes.get(account_id)
+            if not runtime:
+                return False
+            resp = await runtime.client.send_media(max_chat_id, file_bytes, caption, filename)
+            ok = bool(resp)
+            if ok and reply_metric:
+                try:
+                    await self._storage.increment_daily_metric(reply_metric)
+                except Exception:
+                    log.exception("Failed to write report metric=%s", reply_metric)
+            return ok
