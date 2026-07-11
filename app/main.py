@@ -95,10 +95,11 @@ async def main():
     await sender.start()
 
     manager = AccountManager(
-        storage=storage,
-        sender=sender,
-        debug=settings.debug,
-        reply_enabled=settings.reply_enabled,
+    storage=storage,
+    sender=sender,
+    settings=settings,      
+    debug=settings.debug,
+    reply_enabled=settings.reply_enabled,
     )
 
     await _bootstrap_legacy_account(settings, storage, manager)
