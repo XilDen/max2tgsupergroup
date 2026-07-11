@@ -313,13 +313,15 @@ class MaxClient:
                 fut.set_result({})
             err_code = payload.get("error") if isinstance(payload, dict) else None
             err_title = payload.get("title") if isinstance(payload, dict) else None
+            # Логируем полный payload для отладки
             log.warning(
-                "account=%s <<< ERROR op=%-4s seq=%s error=%s title_present=%s",
+                "account=%s <<< ERROR op=%-4s seq=%s error=%s title_present=%s payload=%s",
                 self.account_id,
                 op,
                 seq,
                 err_code,
                 bool(err_title),
+                payload,
             )
 
         if op == OpCode.HANDSHAKE and cmd == 1:
@@ -416,14 +418,17 @@ class MaxClient:
     async def send_message(self, chat_id, text: str) -> dict:
         """Send a text message to a Max chat. Returns the server response."""
         cid = int(time.time() * 1000) * 1000 + random.randint(0, 999)
-        resp = await self.cmd(
-            OpCode.SEND_MESSAGE,
-            {
-                "chatId": chat_id,
-                "message": {"text": text, "cid": cid},
-                "notify": True,
+        # Приводим chat_id к строке и добавляем type
+        payload = {
+            "chatId": str(chat_id),
+            "message": {
+                "text": text,
+                "cid": cid,
+                "type": "text"
             },
-        )
+            "notify": True,
+        }
+        resp = await self.cmd(OpCode.SEND_MESSAGE, payload)
         log.info("send_message account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
         return resp
 
@@ -494,4 +499,3 @@ class MaxClient:
             msg.is_self = True
 
         return msg
-
