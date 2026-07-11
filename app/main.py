@@ -49,10 +49,11 @@ async def _bootstrap_legacy_account(settings, storage: Storage, manager: Account
 
     # Проверяем, приняты ли условия для этого пользователя
     if not await storage.has_terms_consent(tg_user_id):
-        # Если это администратор, автоматически принимаем условия
+        # Если это администратор, автоматически принимаем условия и активируем
         if tg_user_id == settings.tg_admin_id:
             await storage.accept_terms(tg_user_id)
-            log.info("Automatically accepted terms for admin %s", tg_user_id)
+            await manager.activate_user(tg_user_id)  # <-- АКТИВАЦИЯ ДОБАВЛЕНА
+            log.info("Automatically accepted terms and activated admin %s", tg_user_id)
         else:
             log.warning(
                 "Legacy bootstrap skipped: user %s has not accepted terms yet. "
@@ -60,6 +61,13 @@ async def _bootstrap_legacy_account(settings, storage: Storage, manager: Account
                 tg_user_id
             )
             return
+    else:
+        # Условия уже приняты, но возможно пользователь не активирован – активируем, если это админ
+        if tg_user_id == settings.tg_admin_id:
+            user = await storage.get_user(tg_user_id)
+            if user and not user.is_active:
+                await manager.activate_user(tg_user_id)
+                log.info("Activated admin %s", tg_user_id)
 
     try:
         await manager.add_account(
