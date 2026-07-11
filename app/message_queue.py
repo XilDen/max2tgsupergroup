@@ -266,6 +266,11 @@ class QueuedTelegramSender:
             )
             self._backend = self._redis_backend
 
+    @property
+    def bot(self):
+        """Проксируем доступ к боту TelegramSender."""
+        return self._sender.bot
+
     async def start(self) -> None:
         if self._redis_backend:
             try:
@@ -352,12 +357,19 @@ class QueuedTelegramSender:
                     )
                     await self._backend.fail(token, retry_job=None, delay_sec=0.0)
 
-    async def send(self, chat_id: int, text: str, reply_markup=None) -> None:
+    async def send(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         await self._enqueue(
             "send",
             chat_id=chat_id,
             text=text,
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
 
@@ -368,6 +380,7 @@ class QueuedTelegramSender:
         caption: str = "",
         filename: str = "photo.jpg",
         reply_markup=None,
+        message_thread_id: int | None = None,
     ) -> None:
         await self._enqueue(
             "send_photo",
@@ -376,6 +389,7 @@ class QueuedTelegramSender:
             caption=caption,
             filename=filename,
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
 
@@ -386,6 +400,7 @@ class QueuedTelegramSender:
         caption: str = "",
         filename: str = "file",
         reply_markup=None,
+        message_thread_id: int | None = None,
     ) -> None:
         await self._enqueue(
             "send_document",
@@ -394,6 +409,7 @@ class QueuedTelegramSender:
             caption=caption,
             filename=filename,
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
 
@@ -404,6 +420,7 @@ class QueuedTelegramSender:
         caption: str = "",
         filename: str = "video.mp4",
         reply_markup=None,
+        message_thread_id: int | None = None,
     ) -> bool:
         await self._enqueue(
             "send_video",
@@ -412,26 +429,42 @@ class QueuedTelegramSender:
             caption=caption,
             filename=filename,
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
         return True
 
-    async def send_voice(self, chat_id: int, data: bytes, caption: str = "", reply_markup=None) -> None:
+    async def send_voice(
+        self,
+        chat_id: int,
+        data: bytes,
+        caption: str = "",
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         await self._enqueue(
             "send_voice",
             chat_id=chat_id,
             data=data,
             caption=caption,
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
 
-    async def send_sticker(self, chat_id: int, data: bytes, reply_markup=None) -> None:
+    async def send_sticker(
+        self,
+        chat_id: int,
+        data: bytes,
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         await self._enqueue(
             "send_sticker",
             chat_id=chat_id,
             data=data,
             reply_markup=reply_markup,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
 
@@ -440,12 +473,14 @@ class QueuedTelegramSender:
         chat_id: int,
         items: list[dict],
         caption: str = "",
+        message_thread_id: int | None = None,
     ) -> bool:
         await self._enqueue(
             "send_media_group",
             chat_id=chat_id,
             items=items,
             caption=caption,
+            message_thread_id=message_thread_id,
             tenant_tg_user_id=chat_id,
         )
         return True
