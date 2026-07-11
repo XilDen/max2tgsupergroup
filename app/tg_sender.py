@@ -80,7 +80,13 @@ class TelegramSender:
             rest = rest[cut:].lstrip()
         return chunks
 
-    async def _send_text_chunks(self, chat_id: int, text: str, reply_markup=None) -> None:
+    async def _send_text_chunks(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         chunks = self._split_text_for_limit(text, TG_MAX_LENGTH)
         for i, chunk in enumerate(chunks):
             await self._retry(
@@ -89,6 +95,7 @@ class TelegramSender:
                     text=chunk,
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup if i == 0 else None,
+                    message_thread_id=message_thread_id,
                 )
             )
 
@@ -107,10 +114,16 @@ class TelegramSender:
                 return None
         return None
 
-    async def send(self, chat_id: int, text: str, reply_markup=None) -> None:
+    async def send(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         if not text:
             return
-        await self._send_text_chunks(chat_id, text, reply_markup=reply_markup)
+        await self._send_text_chunks(chat_id, text, reply_markup=reply_markup, message_thread_id=message_thread_id)
 
     async def send_photo(
         self,
@@ -119,6 +132,7 @@ class TelegramSender:
         caption: str = "",
         filename: str = "photo.jpg",
         reply_markup=None,
+        message_thread_id: int | None = None,
     ) -> None:
         caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)
         first_caption = caption_chunks[0] if caption_chunks else ""
@@ -130,10 +144,11 @@ class TelegramSender:
                 caption=first_caption or None,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
         )
         for chunk in overflow:
-            await self._send_text_chunks(chat_id, chunk)
+            await self._send_text_chunks(chat_id, chunk, message_thread_id=message_thread_id)
 
     async def send_document(
         self,
@@ -142,6 +157,7 @@ class TelegramSender:
         caption: str = "",
         filename: str = "file",
         reply_markup=None,
+        message_thread_id: int | None = None,
     ) -> None:
         caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)
         first_caption = caption_chunks[0] if caption_chunks else ""
@@ -153,10 +169,11 @@ class TelegramSender:
                 caption=first_caption or None,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
         )
         for chunk in overflow:
-            await self._send_text_chunks(chat_id, chunk)
+            await self._send_text_chunks(chat_id, chunk, message_thread_id=message_thread_id)
 
     async def send_video(
         self,
@@ -165,6 +182,7 @@ class TelegramSender:
         caption: str = "",
         filename: str = "video.mp4",
         reply_markup=None,
+        message_thread_id: int | None = None,
     ) -> bool:
         caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)
         first_caption = caption_chunks[0] if caption_chunks else ""
@@ -176,13 +194,21 @@ class TelegramSender:
                 caption=first_caption or None,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
         )
         for chunk in overflow:
-            await self._send_text_chunks(chat_id, chunk)
+            await self._send_text_chunks(chat_id, chunk, message_thread_id=message_thread_id)
         return result is not None
 
-    async def send_voice(self, chat_id: int, data: bytes, caption: str = "", reply_markup=None) -> None:
+    async def send_voice(
+        self,
+        chat_id: int,
+        data: bytes,
+        caption: str = "",
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         caption_chunks = self._split_text_for_limit(caption or "", TG_CAPTION_MAX)
         first_caption = caption_chunks[0] if caption_chunks else ""
         overflow = caption_chunks[1:]
@@ -193,6 +219,7 @@ class TelegramSender:
                 caption=first_caption or None,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
         )
         if result is None:
@@ -204,17 +231,25 @@ class TelegramSender:
                     caption=first_caption or None,
                     parse_mode=ParseMode.HTML,
                     reply_markup=reply_markup,
+                    message_thread_id=message_thread_id,
                 )
             )
         for chunk in overflow:
-            await self._send_text_chunks(chat_id, chunk)
+            await self._send_text_chunks(chat_id, chunk, message_thread_id=message_thread_id)
 
-    async def send_sticker(self, chat_id: int, data: bytes, reply_markup=None) -> None:
+    async def send_sticker(
+        self,
+        chat_id: int,
+        data: bytes,
+        reply_markup=None,
+        message_thread_id: int | None = None,
+    ) -> None:
         await self._retry(
             lambda: self._bot.send_sticker(
                 chat_id=chat_id,
                 sticker=InputFile(io.BytesIO(data), filename="sticker.webp"),
                 reply_markup=reply_markup,
+                message_thread_id=message_thread_id,
             )
         )
 
@@ -223,6 +258,7 @@ class TelegramSender:
         chat_id: int,
         items: list[dict],
         caption: str = "",
+        message_thread_id: int | None = None,
     ) -> bool:
         if not items:
             return False
@@ -258,7 +294,13 @@ class TelegramSender:
                     )
                 )
 
-        result = await self._retry(lambda: self._bot.send_media_group(chat_id=chat_id, media=media))
+        result = await self._retry(
+            lambda: self._bot.send_media_group(
+                chat_id=chat_id,
+                media=media,
+                message_thread_id=message_thread_id,
+            )
+        )
         for chunk in overflow:
-            await self._send_text_chunks(chat_id, chunk)
+            await self._send_text_chunks(chat_id, chunk, message_thread_id=message_thread_id)
         return result is not None
