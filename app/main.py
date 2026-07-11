@@ -104,12 +104,17 @@ async def main():
     await _bootstrap_legacy_account(settings, storage, manager)
     await manager.start_all()
 
+    # ===== ИЗМЕНЕНИЕ ЗДЕСЬ =====
     tg_app = build_tg_app(
-        settings.tg_bot_token,
-        manager,
-        settings.tg_admin_id,
+        token=settings.tg_bot_token,
+        account_manager=manager,
+        admin_id=settings.tg_admin_id,
+        storage=storage,          # передаём storage
+        settings=settings,        # передаём settings
         app_timezone=settings.app_timezone,
     )
+    # ===========================
+
     tg_app.bot_data["redis_key_prefix"] = settings.redis_key_prefix
     askme_redis = None
     cooldown_store = MemoryCooldownStore()
