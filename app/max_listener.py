@@ -601,49 +601,61 @@ def create_max_client(
             except Exception:
                 log.exception("Failed to write report metric=%s", incoming_metric)
 
-        # --- НОВАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ЧАТА И ТОПИКА ---
+       # --- НОВАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ЧАТА И ТОПИКА ---
         target_chat_id = tg_user_id
         message_thread_id = None
+        use_header = True  # по умолчанию показываем заголовок
 
         if settings and settings.tg_supergroup_id and settings.forum_enabled and storage:
-            # Используем супергруппу
             target_chat_id = int(settings.tg_supergroup_id)
-
-            # Получаем или создаём топик для этого max_chat_id
             max_chat_id_str = str(msg.chat_id)
             topic_id = await storage.get_topic_id(max_chat_id_str)
 
             if topic_id is None:
-                # Создаём топик
+                # Определяем имя топика
+                if is_dm:
+                    topic_name = sender_label or f"Контакт {msg.chat_id}"
+                else:
+                    topic_name = chat_label or f"Группа {msg.chat_id}"
                 try:
                     topic = await sender.bot.create_forum_topic(
                         chat_id=target_chat_id,
-                        name=chat_label  # имя контакта
+                        name=topic_name
                     )
                     topic_id = topic.message_thread_id
-                    await storage.save_topic_mapping(max_chat_id_str, topic_id, chat_label)
+                    await storage.save_topic_mapping(max_chat_id_str, topic_id, topic_name)
                     log.info("Created topic for chat %s (topic_id=%d)", max_chat_id_str, topic_id)
                 except Exception as e:
                     log.exception("Failed to create topic for chat %s", msg.chat_id)
-                    # Если не удалось создать топик, отправляем в общий чат без thread_id
                     topic_id = None
 
             message_thread_id = topic_id
+            # В супергруппе заголовок не нужен
+            use_header = False
         else:
             # Старый режим: отправка в личный чат
             target_chat_id = tg_user_id
             message_thread_id = None
+            use_header = True
 
         # --- ОТПРАВКА С УЧЁТОМ ТОПИКА ---
+        final_header_text = header_text if use_header else ""
+
         link = msg.link
         link_type = link.get("type") if isinstance(link, dict) else None
 
         if link_type in ("FORWARD", "REPLY"):
-            await _handle_linked_message(link, link_type, header_text, client, sender, resolver,
-                                         target_chat_id, kb=kb, message_thread_id=message_thread_id)
+            await _handle_linked_message(
+                link, link_type, final_header_text, client, sender, resolver,
+                target_chat_id, kb=kb, message_thread_id=message_thread_id
+            )
             if msg.text:
-                await sender.send(target_chat_id, f"{header_text}\n{escape(msg.text)}",
-                                  reply_markup=kb, message_thread_id=message_thread_id)
+                body = escape(msg.text)
+                text_to_send = f"{final_header_text}\n{body}" if final_header_text else body
+                await sender.send(
+                    target_chat_id, text_to_send,
+                    reply_markup=kb, message_thread_id=message_thread_id
+                )
             log.info("Forwarded link type=%s -> TG", link_type)
             return
 
@@ -651,7 +663,7 @@ def create_max_client(
             await _send_attaches(
                 attaches=msg.attaches,
                 text=msg.text,
-                header_text=header_text,
+                header_text=final_header_text,
                 client=client,
                 sender=sender,
                 chat_id=target_chat_id,
@@ -660,8 +672,11 @@ def create_max_client(
             )
         else:
             body = escape(msg.text) if msg.text else "<i>[нетекстовое сообщение]</i>"
-            await sender.send(target_chat_id, f"{header_text}\n{body}",
-                              reply_markup=kb, message_thread_id=message_thread_id)
+            text_to_send = f"{final_header_text}\n{body}" if final_header_text else body
+            await sender.send(
+                target_chat_id, text_to_send,
+                reply_markup=kb, message_thread_id=message_thread_id
+            )
             log.info("Forwarded text -> TG")
 
     return client
