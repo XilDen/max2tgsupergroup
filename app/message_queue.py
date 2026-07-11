@@ -268,7 +268,7 @@ class QueuedTelegramSender:
 
     @property
     def bot(self):
-        """Проксируем доступ к боту TelegramSender."""
+        """Проксирует свойство bot из внутреннего TelegramSender."""
         return self._sender.bot
 
     async def start(self) -> None:
