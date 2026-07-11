@@ -25,18 +25,41 @@ log = logging.getLogger("max2tg")
 async def _bootstrap_legacy_account(settings, storage: Storage, manager: AccountManager) -> None:
     max_token = os.environ.get("MAX_TOKEN", "").strip()
     max_device_id = os.environ.get("MAX_DEVICE_ID", "").strip()
-    if not (max_token and max_device_id and settings.tg_chat_id):
+    if not (max_token and max_device_id):
         return
 
-    try:
-        tg_user_id = int(settings.tg_chat_id)
-    except ValueError:
-        log.warning("Legacy bootstrap skipped: TG_CHAT_ID is not numeric")
+    # Определяем tg_user_id: сначала из TG_CHAT_ID (если есть), иначе из TG_ADMIN_ID
+    tg_user_id = None
+    if settings.tg_chat_id:
+        try:
+            tg_user_id = int(settings.tg_chat_id)
+        except ValueError:
+            pass
+    if tg_user_id is None:
+        tg_user_id = settings.tg_admin_id
+
+    if not tg_user_id:
+        log.warning("Legacy bootstrap skipped: no target user ID")
         return
 
     existing = await storage.list_accounts_for_user(tg_user_id)
     if existing:
+        log.info("Legacy bootstrap skipped: user already has accounts")
         return
+
+    # Проверяем, приняты ли условия для этого пользователя
+    if not await storage.has_terms_consent(tg_user_id):
+        # Если это администратор, автоматически принимаем условия
+        if tg_user_id == settings.tg_admin_id:
+            await storage.accept_terms(tg_user_id)
+            log.info("Automatically accepted terms for admin %s", tg_user_id)
+        else:
+            log.warning(
+                "Legacy bootstrap skipped: user %s has not accepted terms yet. "
+                "Please open bot in private chat and press 'Принимаю', then restart.",
+                tg_user_id
+            )
+            return
 
     try:
         await manager.add_account(
@@ -45,10 +68,9 @@ async def _bootstrap_legacy_account(settings, storage: Storage, manager: Account
             max_device_id=max_device_id,
             title="legacy-env",
         )
-        log.info("Legacy account from .env has been registered automatically")
-    except PermissionError:
-        log.warning("Legacy account bootstrap skipped: user has not accepted terms yet")
-
+        log.info("Legacy account from .env has been registered automatically for user %s", tg_user_id)
+    except Exception as e:
+        log.exception("Legacy account bootstrap failed: %s", e)
 
 async def main():
     loop = asyncio.get_running_loop()
