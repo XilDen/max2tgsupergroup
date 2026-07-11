@@ -218,7 +218,7 @@ async def _send_attaches(
     client: MaxClient,
     sender: TelegramSender,
     chat_id: int,
-    kb=None,
+    =None,
     message_thread_id: int | None = None,
 ) -> None:
     meaningful_attaches = _meaningful_attaches(attaches)
@@ -576,14 +576,20 @@ def create_max_client(
             sender_label = escape(sender_name if not sender_missing else "Неизвестный")
         chat_label = escape(resolver.chat_name(msg.chat_id))
         header_text = _header(sender_label, chat_label, is_dm, account_label=account_label)
-        kb = reply_keyboard(account_id, msg.chat_id, is_dm) if reply_enabled and not is_channel else None
-        if reply_enabled and is_channel:
-            log.debug(
-                "Reply button hidden for channel account=%s chat=%s type=%s",
-                account_id,
-                msg.chat_id,
-                resolver.chat_type(msg.chat_id),
-            )
+        
+        # --- ФОРМИРОВАНИЕ КНОПКИ "ОТВЕТИТЬ" (только если не супергруппа) ---
+        if settings and settings.tg_supergroup_id and settings.forum_enabled:
+            # В супергруппе с топиками кнопка не нужна
+            kb = None
+        else:
+            kb = reply_keyboard(account_id, msg.chat_id, is_dm) if reply_enabled and not is_channel else None
+            if reply_enabled and is_channel:
+                log.debug(
+                    "Reply button hidden for channel account=%s chat=%s type=%s",
+                    account_id,
+                    msg.chat_id,
+                    resolver.chat_type(msg.chat_id),
+                )
 
         if stats_callback:
             if is_channel:
