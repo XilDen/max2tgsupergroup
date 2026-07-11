@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -50,7 +51,6 @@ _HTTP_HEADERS = {
 
 
 async def validate_max_credentials(token: str, device_id: str, timeout_sec: float = 12.0) -> bool | None:
-    """Validate Max credentials by performing WS handshake + auth snapshot."""
     if not token or not device_id:
         return False
     seq = 0
@@ -142,6 +142,7 @@ class MaxMessage:
 
 class MaxClient:
     WS_URL = "wss://ws-api.oneme.ru/websocket"
+    API_BASE = "https://platform-api.max.ru"
     HEARTBEAT_SEC = 30
     RECONNECT_SEC = 5
 
@@ -203,7 +204,6 @@ class MaxClient:
         timeout: float = 10,
         timeout_log_level: int = logging.WARNING,
     ) -> dict:
-        """Send a request and wait for the response (cmd=1 with same seq)."""
         loop = asyncio.get_event_loop()
         fut: asyncio.Future[dict] = loop.create_future()
         seq = await self._send(opcode, payload)
@@ -298,7 +298,6 @@ class MaxClient:
         seq = data.get("seq")
         payload = data.get("payload", {})
 
-        # cmd=1 is a response to our request — resolve the pending future
         if cmd == 1 and seq in self._pending:
             fut = self._pending.pop(seq)
             if not fut.done():
@@ -306,14 +305,12 @@ class MaxClient:
             if op not in (OpCode.HANDSHAKE, OpCode.AUTH_SNAPSHOT):
                 log.debug("account=%s <<< RESP  op=%-4s seq=%s", self.account_id, op, seq)
 
-        # cmd=3 is an error response
         elif cmd == 3 and seq in self._pending:
             fut = self._pending.pop(seq)
             if not fut.done():
                 fut.set_result({})
             err_code = payload.get("error") if isinstance(payload, dict) else None
             err_title = payload.get("title") if isinstance(payload, dict) else None
-            # Логируем полный payload для отладки
             log.warning(
                 "account=%s <<< ERROR op=%-4s seq=%s error=%s title_present=%s payload=%s",
                 self.account_id,
@@ -365,7 +362,6 @@ class MaxClient:
     # ── WebSocket RPC: fetch contacts ──────────────────────────────
 
     async def fetch_contacts(self, contact_ids: list[int]) -> dict:
-        """Fetch contact info via WS opcode 32. Returns raw response payload."""
         if not contact_ids:
             return {}
         resp = await self.cmd(
@@ -382,10 +378,8 @@ class MaxClient:
         return resp
 
     async def fetch_chat(self, chat_id: Any) -> dict:
-        """Fetch chat metadata via WS opcode 48. Returns raw response payload."""
         if chat_id is None:
             return {}
-        # Backend schema may vary; try common variants.
         resp = await self.cmd(
             OpCode.CHAT_GET,
             {"chatId": chat_id},
@@ -415,9 +409,123 @@ class MaxClient:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
+    # ===== НОВЫЕ МЕТОДЫ ДЛЯ РАБОТЫ С МЕДИА =====
+
+    async def _get_upload_url(self, file_type: str) -> str | None:
+        """Получить URL для загрузки файла через POST /uploads."""
+        url = f"{self.API_BASE}/uploads?type={file_type}"
+        headers = {
+            **_HTTP_HEADERS,
+            "Authorization": self.token,
+        }
+        try:
+            async with self._session.post(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    upload_url = data.get("url")
+                    if upload_url:
+                        return upload_url
+                    else:
+                        log.warning("Upload URL not returned: %s", data)
+                        return None
+                else:
+                    log.warning("Failed to get upload URL: HTTP %d", resp.status)
+                    return None
+        except Exception:
+            log.exception("Error getting upload URL")
+            return None
+
+    async def upload_file(self, file_bytes: bytes, filename: str) -> str | None:
+        """
+        Загружает файл на сервер Max и возвращает token для вложения.
+        Определяет тип по расширению файла.
+        """
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.heic'):
+            file_type = "image"
+        elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
+            file_type = "video"
+        elif ext in ('.mp3', '.wav', '.m4a'):
+            file_type = "audio"
+        else:
+            file_type = "file"
+
+        upload_url = await self._get_upload_url(file_type)
+        if not upload_url:
+            return None
+
+        # Загружаем файл на полученный URL
+        headers = {
+            "Authorization": self.token,
+            "Content-Type": "multipart/form-data",
+        }
+        data = aiohttp.FormData()
+        data.add_field("data", file_bytes, filename=filename)
+
+        try:
+            async with self._session.post(upload_url, headers=headers, data=data) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    token = result.get("token")
+                    if token:
+                        return token
+                    else:
+                        log.warning("Upload response missing token: %s", result)
+                        return None
+                else:
+                    log.warning("Upload failed HTTP %d", resp.status)
+                    return None
+        except Exception:
+            log.exception("Upload error")
+            return None
+
+    async def send_media(
+        self,
+        chat_id,
+        file_bytes: bytes,
+        caption: str = "",
+        filename: str = "file",
+    ) -> dict:
+        """
+        Отправляет медиафайл (фото, видео, аудио, документ) в чат Max.
+        """
+        token = await self.upload_file(file_bytes, filename)
+        if not token:
+            # fallback – отправляем только текст
+            fallback_text = f"[Не удалось загрузить файл]\n{caption}" if caption else "[Файл]"
+            return await self.send_message(chat_id, fallback_text)
+
+        ext = os.path.splitext(filename)[1].lower()
+        if ext in ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.heic'):
+            attach_type = "image"
+        elif ext in ('.mp4', '.mov', '.mkv', '.webm'):
+            attach_type = "video"
+        elif ext in ('.mp3', '.wav', '.m4a'):
+            attach_type = "audio"
+        else:
+            attach_type = "file"
+
+        cid = int(time.time() * 1000) * 1000 + random.randint(0, 999)
+        payload = {
+            "chatId": int(chat_id),
+            "message": {
+                "text": caption,
+                "cid": cid,
+                "attachments": [
+                    {
+                        "type": attach_type,
+                        "payload": {"token": token}
+                    }
+                ]
+            },
+            "notify": True,
+        }
+        resp = await self.cmd(OpCode.SEND_MESSAGE, payload)
+        log.info("send_media account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
+        return resp
+
     async def send_message(self, chat_id, text: str) -> dict:
-        """Send a text message to a Max chat. Returns the server response."""
-        # Приводим chat_id к числу, если возможно
+        """Отправляет текстовое сообщение."""
         try:
             chat_id_int = int(chat_id)
         except (ValueError, TypeError):
@@ -427,17 +535,41 @@ class MaxClient:
             "chatId": chat_id_int,
             "message": {
                 "text": text,
-                "cid": cid
+                "cid": cid,
             },
             "notify": True,
         }
-        log.debug("send_message payload account=%s: %s", self.account_id, payload)
         resp = await self.cmd(OpCode.SEND_MESSAGE, payload)
         log.info("send_message account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
         return resp
 
+    # ── message parsing ────────────────────────────────────────────
+
+    def _parse_message(self, payload: dict) -> MaxMessage | None:
+        msg_body = payload.get("message")
+        if not msg_body or not isinstance(msg_body, dict):
+            return None
+
+        msg = MaxMessage(
+            chat_id=payload.get("chatId"),
+            sender_id=msg_body.get("sender"),
+            text=msg_body.get("text", ""),
+            timestamp=msg_body.get("time"),
+            message_id=str(msg_body.get("id", "")),
+            attaches=msg_body.get("attaches") or [],
+            link=msg_body.get("link") or {},
+            raw=payload,
+        )
+
+        if self._my_id and msg.sender_id == self._my_id:
+            msg.is_self = True
+
+        return msg
+
+    # ── file download (already present) ────────────────────────────
+
     async def download_file(self, url: str, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes | None:
-        """Download a file by URL, returning raw bytes or None on failure."""
+        """Скачивает файл по URL с ограничением по размеру."""
         session = getattr(self, "_session", None)
         close_after = False
         if session is None or session.closed:
@@ -480,26 +612,3 @@ class MaxClient:
             if close_after:
                 await session.close()
         return None
-
-    # ── message parsing ────────────────────────────────────────────
-
-    def _parse_message(self, payload: dict) -> MaxMessage | None:
-        msg_body = payload.get("message")
-        if not msg_body or not isinstance(msg_body, dict):
-            return None
-
-        msg = MaxMessage(
-            chat_id=payload.get("chatId"),
-            sender_id=msg_body.get("sender"),
-            text=msg_body.get("text", ""),
-            timestamp=msg_body.get("time"),
-            message_id=str(msg_body.get("id", "")),
-            attaches=msg_body.get("attaches") or [],
-            link=msg_body.get("link") or {},
-            raw=payload,
-        )
-
-        if self._my_id and msg.sender_id == self._my_id:
-            msg.is_self = True
-
-        return msg
