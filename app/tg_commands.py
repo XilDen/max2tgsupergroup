@@ -1054,8 +1054,6 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
     # Проверяем, есть ли топик (message_thread_id)
     topic_id = update.effective_message.message_thread_id
     if not topic_id:
-        # Сообщение в общем чате (без топика) – игнорируем или можно отправить в какой-то дефолтный чат
-        # По желанию можно ответить, что нужно использовать топики
         await update.message.reply_text("ℹ️ Пожалуйста, отвечайте в существующих топиках.")
         return
 
@@ -1070,73 +1068,86 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⚠️ Этот топик не связан с чатом в Max.")
         return
 
-    # Получаем account_manager
     manager: AccountManager = context.bot_data["account_manager"]
+    tg_user_id = update.effective_user.id
+    accounts = await manager.list_accounts_for_user(tg_user_id)
+    if not accounts:
+        await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
+        return
+    account_id = accounts[0].id
 
-    # Если это ответ на предыдущее сообщение (reply) – используем его как ответ в Max
-    if update.effective_message.reply_to_message:
-        # Попробуем определить account_id для этого чата (у пользователя может быть несколько аккаунтов)
-        # В данном случае нам нужно выбрать аккаунт, который обслуживает этот чат.
-        # Можно хранить account_id в mapping, но у нас его нет. Поэтому используем первый активный аккаунт пользователя.
-        # Для упрощения возьмём первый аккаунт из списка активных (можно доработать).
-        tg_user_id = update.effective_user.id
-        accounts = await manager.list_accounts_for_user(tg_user_id)
-        if not accounts:
-            await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
-            return
-        account_id = accounts[0].id  # упрощённо – берём первый
+    # Определяем, является ли сообщение ответом на предыдущее
+    is_reply = bool(update.effective_message.reply_to_message)
+    reply_metric = "reply_group" if is_reply else "forward_group"
 
-        # Отправляем как ответ
-        text = update.effective_message.text or update.effective_message.caption or ""
-        if not text:
-            await update.message.reply_text("⚠️ Отправьте текстовое сообщение или подпись к медиа.")
-            return
+    # --- Обработка медиа (фото, видео, документы) ---
+    photo = update.effective_message.photo
+    document = update.effective_message.document
+    video = update.effective_message.video
+    voice = update.effective_message.voice
+    audio = update.effective_message.audio
 
+    if photo or document or video or voice or audio:
         try:
-            ok = await manager.send_message(
+            if photo:
+                file_obj = await photo[-1].get_file()
+                filename = "photo.jpg"
+            elif document:
+                file_obj = await document.get_file()
+                filename = document.file_name or "document"
+            elif video:
+                file_obj = await video.get_file()
+                filename = video.file_name or "video.mp4"
+            elif voice:
+                file_obj = await voice.get_file()
+                filename = "voice.ogg"
+            elif audio:
+                file_obj = await audio.get_file()
+                filename = audio.file_name or "audio"
+            else:
+                return
+
+            file_bytes = await file_obj.download_as_bytearray()
+            caption = update.effective_message.text or update.effective_message.caption or ""
+            ok = await manager.send_media(
                 account_id=account_id,
                 tg_user_id=tg_user_id,
                 max_chat_id=max_chat_id,
-                text=text,
-                reply_metric="reply_group"  # или "reply_dm" – зависит от типа чата, можно определить по max_chat_id
+                file_bytes=file_bytes,
+                filename=filename,
+                caption=caption,
+                reply_metric=reply_metric,
             )
             if ok:
-                await update.message.reply_text("✅ Ответ отправлен в Max.")
+                await update.message.reply_text("✅ Медиа отправлено в Max.")
             else:
-                await update.message.reply_text("⚠️ Не удалось отправить ответ в Max.")
+                await update.message.reply_text("⚠️ Не удалось отправить медиа в Max.")
         except Exception as e:
-            log.exception("Failed to send reply from supergroup")
-            await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
-    else:
-        # Это новое сообщение в топике (не ответ) – отправляем как новое сообщение в Max
-        tg_user_id = update.effective_user.id
-        accounts = await manager.list_accounts_for_user(tg_user_id)
-        if not accounts:
-            await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
-            return
-        account_id = accounts[0].id
+            log.exception("Failed to send media from supergroup")
+            await update.message.reply_text(f"⚠️ Ошибка при отправке медиа: {e}")
+        return
 
-        text = update.effective_message.text or update.effective_message.caption or ""
-        if not text:
-            await update.message.reply_text("⚠️ Отправьте текстовое сообщение или подпись к медиа.")
-            return
+    # --- Если нет медиа, отправляем текст ---
+    text = update.effective_message.text or update.effective_message.caption or ""
+    if not text:
+        await update.message.reply_text("⚠️ Отправьте текстовое сообщение или медиа с подписью.")
+        return
 
-        try:
-            ok = await manager.send_message(
-                account_id=account_id,
-                tg_user_id=tg_user_id,
-                max_chat_id=max_chat_id,
-                text=text,
-                reply_metric="forward_group"  # или "forward_dm"
-            )
-            if ok:
-                await update.message.reply_text("✅ Сообщение отправлено в Max.")
-            else:
-                await update.message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
-        except Exception as e:
-            log.exception("Failed to send new message from supergroup")
-            await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
-
+    try:
+        ok = await manager.send_message(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            max_chat_id=max_chat_id,
+            text=text,
+            reply_metric=reply_metric,
+        )
+        if ok:
+            await update.message.reply_text("✅ Сообщение отправлено в Max." if not is_reply else "✅ Ответ отправлен в Max.")
+        else:
+            await update.message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
+    except Exception as e:
+        log.exception("Failed to send message from supergroup")
+        await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
 
 # ==================== Регистрация обработчиков ====================
 
