@@ -167,6 +167,7 @@ class MaxClient:
         self._dispatch_counter = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._stop_event = asyncio.Event()
+        self._http_token = None  # Токен для HTTP запросов (apiToken)
 
     # ── decorator API ──────────────────────────────────────────────
 
@@ -335,6 +336,20 @@ class MaxClient:
         elif op == OpCode.AUTH_SNAPSHOT and cmd == 1:
             self._my_id = payload.get("profile", {}).get("id")
             log.info("Authorized account=%s my_id=%s", self.account_id, self._my_id)
+            # Сохраняем http токен (apiToken) для загрузки файлов
+            # Ищем в разных местах
+            api_token = payload.get("apiToken") or payload.get("api_token")
+            if not api_token:
+                # Может быть в profile
+                profile = payload.get("profile", {})
+                if isinstance(profile, dict):
+                    api_token = profile.get("apiToken") or profile.get("api_token")
+            if api_token:
+                self._http_token = api_token
+                log.info("Found http token (apiToken) for account=%s: %s...", self.account_id, api_token[:20])
+            else:
+                log.warning("No apiToken found in AUTH_SNAPSHOT, using token from WS (may fail)")
+                self._http_token = self.token  # fallback
 
             if self._on_ready_cb:
                 await self._on_ready_cb(payload)
@@ -409,14 +424,17 @@ class MaxClient:
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
 
-    # ===== НОВЫЕ МЕТОДЫ ДЛЯ РАБОТЫ С МЕДИА =====
+    # ===== МЕТОДЫ ДЛЯ РАБОТЫ С МЕДИА =====
 
     async def _get_upload_url(self, file_type: str) -> str | None:
         """Получить URL для загрузки файла через POST /uploads."""
+        if not self._http_token:
+            log.warning("HTTP token not available for upload")
+            return None
         url = f"{self.API_BASE}/uploads?type={file_type}"
         headers = {
             **_HTTP_HEADERS,
-            "Authorization": self.token,
+            "Authorization": f"Bearer {self._http_token}",
         }
         try:
             async with self._session.post(url, headers=headers) as resp:
@@ -424,14 +442,15 @@ class MaxClient:
                     data = await resp.json()
                     upload_url = data.get("url")
                     if upload_url:
+                        log.debug("Got upload URL: %s", upload_url)
                         return upload_url
                     else:
                         log.warning("Upload URL not returned: %s", data)
                         return None
                 else:
-                    log.warning("Failed to get upload URL: HTTP %d", resp.status)
+                    log.warning("Failed to get upload URL: HTTP %d, response: %s", resp.status, await resp.text())
                     return None
-        except Exception:
+        except Exception as e:
             log.exception("Error getting upload URL")
             return None
 
@@ -454,26 +473,24 @@ class MaxClient:
         if not upload_url:
             return None
 
-        # Загружаем файл на полученный URL
-        headers = {
-            "Authorization": self.token,
-            "Content-Type": "multipart/form-data",
-        }
+        # Загружаем файл на полученный URL (без дополнительных заголовков авторизации)
+        # Используем multipart/form-data
         data = aiohttp.FormData()
         data.add_field("data", file_bytes, filename=filename)
 
         try:
-            async with self._session.post(upload_url, headers=headers, data=data) as resp:
+            async with self._session.post(upload_url, data=data) as resp:
                 if resp.status == 200:
                     result = await resp.json()
                     token = result.get("token")
                     if token:
+                        log.debug("Upload successful, token: %s", token[:20])
                         return token
                     else:
                         log.warning("Upload response missing token: %s", result)
                         return None
                 else:
-                    log.warning("Upload failed HTTP %d", resp.status)
+                    log.warning("Upload failed HTTP %d, response: %s", resp.status, await resp.text())
                     return None
         except Exception:
             log.exception("Upload error")
