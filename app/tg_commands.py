@@ -25,6 +25,10 @@ from app.time_utils import (
     seconds_until_next_app_day,
 )
 
+# Новые импорты для работы с супергруппой и топиками
+from app.storage import Storage
+from app.config import Settings
+
 log = logging.getLogger(__name__)
 
 PENDING_REPLY_CHAT_KEY = "pending_reply_chat_id"
@@ -45,7 +49,7 @@ GLOBAL_MUTATION_LIMIT = 120
 MUTATION_LOCK_SEC = 20
 
 TERMS_TEXT = (
-    "*Отказ от ответсвенности:*\n"
+    "*Отказ от ответственности:*\n"
     "1. Этот проект является независимым, неофициальным и не связан с разработчиками "
     "мессенджера Max (или любой другой сторонней организацией). Авторы Max не одобряют, "
     "не поддерживают и не несут ответственности за этот код.\n\n"
@@ -61,7 +65,7 @@ TERMS_TEXT = (
     "5. Этот проект создан в образовательных и исследовательских целях. Авторы не поощряют "
     "и не рекомендуют использование для обхода требований государственных органов или нарушения "
     "пользовательских соглашений третьих сторон.\n"
-    "6. Авторы сделали все возможное, чтобы предотвратить утечку персданных и не хранят историю "
+    "6. Авторы сделали все возможное, чтобы предотвратить утечку персональных данных и не хранят историю "
     "переписки, кроме технических сведений для механизмов переотправки сообщений. "
     "Удаление связки доступно из меню пользователя в любой момент.\n\n"
     "Продолжая работать с ботом вы соглашаетесь с условиями и не имеете никаких претензий "
@@ -72,6 +76,17 @@ TERMS_TEXT = (
 def _is_private_chat(update: Update) -> bool:
     chat = update.effective_chat
     return bool(chat and chat.type == "private")
+
+
+def _is_supergroup(update: Update, settings: Settings) -> bool:
+    """Проверяет, является ли чат супергруппой, указанной в настройках."""
+    if not settings.tg_supergroup_id:
+        return False
+    chat = update.effective_chat
+    if not chat:
+        return False
+    # ID супергрупп обычно отрицательные, но сравниваем как строки для надёжности
+    return str(chat.id) == str(settings.tg_supergroup_id)
 
 
 def _is_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -88,7 +103,7 @@ def _terms_keyboard() -> InlineKeyboardMarkup:
 async def _send_terms(update: Update) -> None:
     message = update.effective_message
     if message:
-        await message.reply_text(TERMS_TEXT, reply_markup=_terms_keyboard(),parse_mode="Markdown")
+        await message.reply_text(TERMS_TEXT, reply_markup=_terms_keyboard(), parse_mode="Markdown")
 
 
 async def _ensure_terms_accepted(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -125,7 +140,11 @@ def _admin_help() -> str:
         "/accounts - список ваших MAX аккаунтов\n"
         "/remove - отключить все ваши привязки (с подтверждением)\n"
         "/askme - отправить сообщение администратору (раз в 24 часа)\n"
-        "/cancel - отменить текущий reply"
+        "/cancel - отменить текущий reply\n"
+        # Новые команды для управления топиками (доступны только в супергруппе)
+        "/list_topics - список всех топиков\n"
+        "/rename_topic <max_chat_id> <новое имя> - переименовать топик\n"
+        "/close_topic <max_chat_id> - закрыть топик и удалить связь"
     )
 
 
@@ -285,6 +304,8 @@ async def _notify_admin_registration(update: Update, context: ContextTypes.DEFAU
     )
     await context.bot.send_message(chat_id=admin_id, text=text, parse_mode="Markdown")
 
+
+# ==================== Старые обработчики (личные чаты) ====================
 
 async def _on_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_private_chat(update):
@@ -889,9 +910,240 @@ async def _on_accept_terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+# ==================== Новые обработчики для супергруппы и топиков ====================
+
+def _get_settings(context: ContextTypes.DEFAULT_TYPE) -> Settings | None:
+    """Возвращает настройки из bot_data, если они там есть."""
+    return context.bot_data.get("settings")
+
+
+def _get_storage(context: ContextTypes.DEFAULT_TYPE) -> Storage | None:
+    """Возвращает Storage из bot_data."""
+    return context.bot_data.get("storage")
+
+
+async def _on_list_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Список всех топиков (доступно только админу в супергруппе)."""
+    settings = _get_settings(context)
+    if not settings or not settings.tg_supergroup_id:
+        return
+    if not _is_supergroup(update, settings):
+        return
+    if not _is_admin(update, context):
+        await update.message.reply_text("⚠️ Команда доступна только администратору.")
+        return
+
+    storage = _get_storage(context)
+    if not storage:
+        await update.message.reply_text("⚠️ Хранилище недоступно.")
+        return
+
+    mappings = await storage.list_all_topic_mappings()
+    if not mappings:
+        await update.message.reply_text("Нет активных топиков.")
+        return
+
+    lines = ["📋 Активные топики:"]
+    for m in mappings:
+        lines.append(f"- {m['topic_name']} (max_chat: {m['max_chat_id']}, topic_id: {m['topic_id']})")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def _on_rename_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Переименовать топик (админ в супергруппе)."""
+    settings = _get_settings(context)
+    if not settings or not settings.tg_supergroup_id:
+        return
+    if not _is_supergroup(update, settings):
+        return
+    if not _is_admin(update, context):
+        await update.message.reply_text("⚠️ Команда доступна только администратору.")
+        return
+
+    args = context.args or []
+    if len(args) < 2:
+        await update.message.reply_text("Формат: /rename_topic <max_chat_id> <новое имя>")
+        return
+
+    max_chat_id = args[0]
+    new_name = " ".join(args[1:]).strip()
+    if not new_name:
+        await update.message.reply_text("⚠️ Укажите новое имя.")
+        return
+
+    storage = _get_storage(context)
+    if not storage:
+        await update.message.reply_text("⚠️ Хранилище недоступно.")
+        return
+
+    # Проверим, есть ли такая связка
+    topic_id = await storage.get_topic_id(max_chat_id)
+    if topic_id is None:
+        await update.message.reply_text(f"⚠️ Топик для чата {max_chat_id} не найден.")
+        return
+
+    try:
+        # Переименовываем топик в Telegram
+        await context.bot.edit_forum_topic(
+            chat_id=int(settings.tg_supergroup_id),
+            message_thread_id=topic_id,
+            name=new_name
+        )
+        # Обновляем имя в БД
+        await storage.update_topic_name(max_chat_id, new_name)
+        await update.message.reply_text(f"✅ Топик для чата {max_chat_id} переименован в '{new_name}'.")
+    except Exception as e:
+        log.exception("Failed to rename topic for %s", max_chat_id)
+        await update.message.reply_text(f"⚠️ Не удалось переименовать топик: {e}")
+
+
+async def _on_close_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть топик и удалить связь (админ в супергруппе)."""
+    settings = _get_settings(context)
+    if not settings or not settings.tg_supergroup_id:
+        return
+    if not _is_supergroup(update, settings):
+        return
+    if not _is_admin(update, context):
+        await update.message.reply_text("⚠️ Команда доступна только администратору.")
+        return
+
+    args = context.args or []
+    if len(args) != 1:
+        await update.message.reply_text("Формат: /close_topic <max_chat_id>")
+        return
+
+    max_chat_id = args[0].strip()
+    storage = _get_storage(context)
+    if not storage:
+        await update.message.reply_text("⚠️ Хранилище недоступно.")
+        return
+
+    topic_id = await storage.get_topic_id(max_chat_id)
+    if topic_id is None:
+        await update.message.reply_text(f"⚠️ Топик для чата {max_chat_id} не найден.")
+        return
+
+    try:
+        # Закрываем топик в Telegram (можно также удалить, но лучше закрыть)
+        await context.bot.close_forum_topic(
+            chat_id=int(settings.tg_supergroup_id),
+            message_thread_id=topic_id
+        )
+        # Удаляем запись из БД
+        await storage.delete_topic_mapping(max_chat_id)
+        await update.message.reply_text(f"✅ Топик для чата {max_chat_id} закрыт и удалён из базы.")
+    except Exception as e:
+        log.exception("Failed to close topic for %s", max_chat_id)
+        await update.message.reply_text(f"⚠️ Не удалось закрыть топик: {e}")
+
+
+async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик сообщений из супергруппы (текст, медиа)."""
+    settings = _get_settings(context)
+    if not settings or not settings.tg_supergroup_id:
+        return
+    if not _is_supergroup(update, settings):
+        return
+
+    # Игнорируем сообщения от самого бота
+    bot_id = context.bot.id
+    if update.effective_user and update.effective_user.id == bot_id:
+        return
+
+    # Проверяем, есть ли топик (message_thread_id)
+    topic_id = update.effective_message.message_thread_id
+    if not topic_id:
+        # Сообщение в общем чате (без топика) – игнорируем или можно отправить в какой-то дефолтный чат
+        # По желанию можно ответить, что нужно использовать топики
+        await update.message.reply_text("ℹ️ Пожалуйста, отвечайте в существующих топиках.")
+        return
+
+    storage = _get_storage(context)
+    if not storage:
+        await update.message.reply_text("⚠️ Хранилище недоступно.")
+        return
+
+    # Получаем max_chat_id по топику
+    max_chat_id = await storage.get_max_chat_id_by_topic(topic_id)
+    if not max_chat_id:
+        await update.message.reply_text("⚠️ Этот топик не связан с чатом в Max.")
+        return
+
+    # Получаем account_manager
+    manager: AccountManager = context.bot_data["account_manager"]
+
+    # Если это ответ на предыдущее сообщение (reply) – используем его как ответ в Max
+    if update.effective_message.reply_to_message:
+        # Попробуем определить account_id для этого чата (у пользователя может быть несколько аккаунтов)
+        # В данном случае нам нужно выбрать аккаунт, который обслуживает этот чат.
+        # Можно хранить account_id в mapping, но у нас его нет. Поэтому используем первый активный аккаунт пользователя.
+        # Для упрощения возьмём первый аккаунт из списка активных (можно доработать).
+        tg_user_id = update.effective_user.id
+        accounts = await manager.list_accounts_for_user(tg_user_id)
+        if not accounts:
+            await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
+            return
+        account_id = accounts[0].id  # упрощённо – берём первый
+
+        # Отправляем как ответ
+        text = update.effective_message.text or update.effective_message.caption or ""
+        if not text:
+            await update.message.reply_text("⚠️ Отправьте текстовое сообщение или подпись к медиа.")
+            return
+
+        try:
+            ok = await manager.send_message(
+                account_id=account_id,
+                tg_user_id=tg_user_id,
+                max_chat_id=max_chat_id,
+                text=text,
+                reply_metric="reply_group"  # или "reply_dm" – зависит от типа чата, можно определить по max_chat_id
+            )
+            if ok:
+                await update.message.reply_text("✅ Ответ отправлен в Max.")
+            else:
+                await update.message.reply_text("⚠️ Не удалось отправить ответ в Max.")
+        except Exception as e:
+            log.exception("Failed to send reply from supergroup")
+            await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
+    else:
+        # Это новое сообщение в топике (не ответ) – отправляем как новое сообщение в Max
+        tg_user_id = update.effective_user.id
+        accounts = await manager.list_accounts_for_user(tg_user_id)
+        if not accounts:
+            await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
+            return
+        account_id = accounts[0].id
+
+        text = update.effective_message.text or update.effective_message.caption or ""
+        if not text:
+            await update.message.reply_text("⚠️ Отправьте текстовое сообщение или подпись к медиа.")
+            return
+
+        try:
+            ok = await manager.send_message(
+                account_id=account_id,
+                tg_user_id=tg_user_id,
+                max_chat_id=max_chat_id,
+                text=text,
+                reply_metric="forward_group"  # или "forward_dm"
+            )
+            if ok:
+                await update.message.reply_text("✅ Сообщение отправлено в Max.")
+            else:
+                await update.message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
+        except Exception as e:
+            log.exception("Failed to send new message from supergroup")
+            await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
+
+
+# ==================== Регистрация обработчиков ====================
+
 def register_handlers(app: Application) -> None:
     private_filter = filters.ChatType.PRIVATE
 
+    # Старые команды для личных чатов
     app.add_handler(CommandHandler("start", _on_start, filters=private_filter))
     app.add_handler(CommandHandler("help", _on_help, filters=private_filter))
     app.add_handler(CommandHandler("register", _on_register, filters=private_filter))
@@ -908,7 +1160,24 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(_on_accept_terms, pattern=r"^accept_terms$"))
     app.add_handler(CallbackQueryHandler(_on_reply_button, pattern=r"^reply:"))
     app.add_handler(CallbackQueryHandler(_on_remove_all_confirm, pattern=r"^remove_all:"))
+
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND & private_filter, _on_text_reply)
     )
     app.add_handler(MessageHandler(filters.ALL & private_filter, _on_any_private_message))
+
+    # Новые команды для супергруппы (доступны только админу)
+    supergroup_filter = filters.ChatType.SUPERGROUP
+    app.add_handler(CommandHandler("list_topics", _on_list_topics, filters=supergroup_filter))
+    app.add_handler(CommandHandler("rename_topic", _on_rename_topic, filters=supergroup_filter))
+    app.add_handler(CommandHandler("close_topic", _on_close_topic, filters=supergroup_filter))
+
+    # Обработчик всех сообщений из супергруппы (текст, медиа, команды?)
+    # Он должен срабатывать после команд, поэтому добавляем его с низким приоритетом
+    app.add_handler(
+        MessageHandler(
+            filters.ALL & supergroup_filter,
+            _on_supergroup_message
+        ),
+        group=1  # после команд (группа 0 по умолчанию)
+    )
