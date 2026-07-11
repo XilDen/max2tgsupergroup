@@ -417,17 +417,21 @@ class MaxClient:
 
     async def send_message(self, chat_id, text: str) -> dict:
         """Send a text message to a Max chat. Returns the server response."""
+        # Приводим chat_id к числу, если возможно
+        try:
+            chat_id_int = int(chat_id)
+        except (ValueError, TypeError):
+            chat_id_int = chat_id
         cid = int(time.time() * 1000) * 1000 + random.randint(0, 999)
-        # Приводим chat_id к строке и добавляем type
         payload = {
-            "chatId": str(chat_id),
+            "chatId": chat_id_int,
             "message": {
                 "text": text,
-                "cid": cid,
-                "type": "text"
+                "cid": cid
             },
             "notify": True,
         }
+        log.debug("send_message payload account=%s: %s", self.account_id, payload)
         resp = await self.cmd(OpCode.SEND_MESSAGE, payload)
         log.info("send_message account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
         return resp
