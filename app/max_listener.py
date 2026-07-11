@@ -8,6 +8,10 @@ from app.privacy import mask_mapping_values
 from app.resolver import ContactResolver
 from app.tg_sender import TelegramSender, reply_keyboard
 
+# Импортируем для работы с супергруппой
+from app.storage import Storage
+from app.config import Settings
+
 log = logging.getLogger(__name__)
 
 PHOTO_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -26,12 +30,10 @@ def _header(sender_label: str, chat_label: str, is_dm: bool, account_label: str 
 
 
 def _extract_photo_url(attach: dict) -> str | None:
-    """Extract the best available URL for a PHOTO attachment."""
     return attach.get("baseUrl") or attach.get("url")
 
 
 def _extract_file_url(attach: dict) -> str | None:
-    """Extract download URL for a FILE attachment (url field takes priority)."""
     url = attach.get("url")
     if url and url.startswith("http"):
         return url
@@ -79,11 +81,13 @@ async def _download_limited(client: MaxClient, url: str, kind: str) -> bytes | N
 
 async def _send_oversized_notice(
     sender: TelegramSender,
-    tg_user_id: int,
+    chat_id: int,
     header_text: str,
     reply_markup=None,
+    message_thread_id: int | None = None,
 ) -> None:
-    await sender.send(tg_user_id, f"{header_text}\n<i>[{OVERSIZED_NOTICE}]</i>", reply_markup=reply_markup)
+    await sender.send(chat_id, f"{header_text}\n<i>[{OVERSIZED_NOTICE}]</i>",
+                      reply_markup=reply_markup, message_thread_id=message_thread_id)
 
 
 def _looks_like_video(data: bytes) -> bool:
@@ -213,15 +217,18 @@ async def _send_attaches(
     header_text: str,
     client: MaxClient,
     sender: TelegramSender,
-    tg_user_id: int,
+    chat_id: int,
     kb=None,
+    message_thread_id: int | None = None,
 ) -> None:
     meaningful_attaches = _meaningful_attaches(attaches)
     if not meaningful_attaches:
         if text:
-            await sender.send(tg_user_id, f"{header_text}\n{escape(text)}", reply_markup=kb)
+            await sender.send(chat_id, f"{header_text}\n{escape(text)}",
+                              reply_markup=kb, message_thread_id=message_thread_id)
         else:
-            await sender.send(tg_user_id, f"{header_text}\n<i>[без содержимого]</i>", reply_markup=kb)
+            await sender.send(chat_id, f"{header_text}\n<i>[без содержимого]</i>",
+                              reply_markup=kb, message_thread_id=message_thread_id)
         return
     skipped_count = max(0, len(meaningful_attaches) - MAX_ATTACHMENTS_PER_MESSAGE)
     if skipped_count:
@@ -247,11 +254,13 @@ async def _send_attaches(
     album_index_set = set(album_indexes[:10])
 
     if len(album_candidates) >= 2:
-        used_album = await sender.send_media_group(tg_user_id, album_candidates[:10], caption=caption)
+        used_album = await sender.send_media_group(chat_id, album_candidates[:10], caption=caption,
+                                                   message_thread_id=message_thread_id)
         if used_album:
             log.info("Forwarded media group -> TG items=%d", min(len(album_candidates), 10))
             if kb:
-                await sender.send(tg_user_id, "↩️ <i>Ответ доступен кнопкой ниже</i>", reply_markup=kb)
+                await sender.send(chat_id, "↩️ <i>Ответ доступен кнопкой ниже</i>",
+                                  reply_markup=kb, message_thread_id=message_thread_id)
 
     for i, attach in enumerate(meaningful_attaches):
         if used_album and i in album_index_set:
@@ -259,12 +268,14 @@ async def _send_attaches(
         cap = header_text
         if not used_album and i == 0 and text:
             cap = caption
-        await _send_attach(attach, client, sender, tg_user_id, cap, kb=kb)
+        await _send_attach(attach, client, sender, chat_id, cap, kb=kb,
+                           message_thread_id=message_thread_id)
         log.debug("Forwarded attach _type=%s -> TG", attach.get("_type"))
     if skipped_count:
         await sender.send(
-            tg_user_id,
+            chat_id,
             f"{header_text}\n<i>[пропущено вложений сверх лимита: {skipped_count}]</i>",
+            message_thread_id=message_thread_id,
         )
 
 
@@ -272,9 +283,10 @@ async def _send_attach(
     attach: dict,
     client: MaxClient,
     sender: TelegramSender,
-    tg_user_id: int,
+    chat_id: int,
     header_text: str,
     kb=None,
+    message_thread_id: int | None = None,
 ) -> bool:
     """Process and send a single attachment. Returns True if handled."""
     atype = attach.get("_type", "")
@@ -289,22 +301,28 @@ async def _send_attach(
             log.warning("PHOTO attach has no URL; keys=%s", list(attach.keys()))
             return False
         if _is_oversized(attach, "photo"):
-            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            await _send_oversized_notice(sender, chat_id, header_text,
+                                         reply_markup=kb, message_thread_id=message_thread_id)
             return True
         data = await _download_limited(client, url, "photo")
         if data:
-            await sender.send_photo(tg_user_id, data, caption=header_text, reply_markup=kb)
+            await sender.send_photo(chat_id, data, caption=header_text,
+                                    reply_markup=kb, message_thread_id=message_thread_id)
             return True
-        await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+        await _send_oversized_notice(sender, chat_id, header_text,
+                                     reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "VIDEO":
         if _is_oversized(attach, "video"):
-            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            await _send_oversized_notice(sender, chat_id, header_text,
+                                         reply_markup=kb, message_thread_id=message_thread_id)
             return True
         data, filename = await _download_video_with_fallback(attach, client)
         if data:
-            sent = await sender.send_video(tg_user_id, data, caption=header_text, filename=filename, reply_markup=kb)
+            sent = await sender.send_video(chat_id, data, caption=header_text,
+                                           filename=filename, reply_markup=kb,
+                                           message_thread_id=message_thread_id)
             if sent:
                 return True
             log.warning("Failed to send VIDEO as video, falling back to preview")
@@ -313,10 +331,12 @@ async def _send_attach(
             data = await _download_limited(client, thumb, "photo")
             if data:
                 await sender.send_photo(
-                    tg_user_id, data, caption=f"{header_text}\n<i>[видео — превью]</i>", reply_markup=kb
+                    chat_id, data, caption=f"{header_text}\n<i>[видео — превью]</i>",
+                    reply_markup=kb, message_thread_id=message_thread_id
                 )
                 return True
-        await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+        await _send_oversized_notice(sender, chat_id, header_text,
+                                     reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "FILE":
@@ -326,53 +346,72 @@ async def _send_attach(
         if token_url:
             kind = _guess_media_kind(name)
             if _is_oversized(attach, kind):
-                await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+                await _send_oversized_notice(sender, chat_id, header_text,
+                                             reply_markup=kb, message_thread_id=message_thread_id)
                 return True
             data = await _download_limited(client, token_url, kind)
             if data:
                 if kind == "photo":
-                    await sender.send_photo(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
+                    await sender.send_photo(chat_id, data, caption=header_text,
+                                            filename=name, reply_markup=kb,
+                                            message_thread_id=message_thread_id)
                 elif kind == "video":
-                    sent = await sender.send_video(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
+                    sent = await sender.send_video(chat_id, data, caption=header_text,
+                                                   filename=name, reply_markup=kb,
+                                                   message_thread_id=message_thread_id)
                     if not sent:
-                        await sender.send_document(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
+                        await sender.send_document(chat_id, data, caption=header_text,
+                                                   filename=name, reply_markup=kb,
+                                                   message_thread_id=message_thread_id)
                 else:
-                    await sender.send_document(tg_user_id, data, caption=header_text, filename=name, reply_markup=kb)
+                    await sender.send_document(chat_id, data, caption=header_text,
+                                               filename=name, reply_markup=kb,
+                                               message_thread_id=message_thread_id)
                 return True
-            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            await _send_oversized_notice(sender, chat_id, header_text,
+                                         reply_markup=kb, message_thread_id=message_thread_id)
             return True
         size_str = f" ({_human_size(size)})" if size else ""
-        await sender.send(tg_user_id, f"{header_text}\n📎 <b>{escape(name)}</b>{size_str}", reply_markup=kb)
+        await sender.send(chat_id, f"{header_text}\n📎 <b>{escape(name)}</b>{size_str}",
+                          reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "AUDIO":
         url = attach.get("url")
         if url:
             if _is_oversized(attach, "document"):
-                await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+                await _send_oversized_notice(sender, chat_id, header_text,
+                                             reply_markup=kb, message_thread_id=message_thread_id)
                 return True
             data = await _download_limited(client, url, "document")
             if data:
-                await sender.send_voice(tg_user_id, data, caption=header_text, reply_markup=kb)
+                await sender.send_voice(chat_id, data, caption=header_text,
+                                        reply_markup=kb, message_thread_id=message_thread_id)
                 return True
-            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            await _send_oversized_notice(sender, chat_id, header_text,
+                                         reply_markup=kb, message_thread_id=message_thread_id)
             return True
-        await sender.send(tg_user_id, f"{header_text}\n<i>[аудио]</i>", reply_markup=kb)
+        await sender.send(chat_id, f"{header_text}\n<i>[аудио]</i>",
+                          reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "STICKER":
         url = attach.get("url")
         if url:
             if _is_oversized(attach, "photo"):
-                await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+                await _send_oversized_notice(sender, chat_id, header_text,
+                                             reply_markup=kb, message_thread_id=message_thread_id)
                 return True
             data = await _download_limited(client, url, "photo")
             if data:
-                await sender.send_sticker(tg_user_id, data, reply_markup=kb)
+                await sender.send_sticker(chat_id, data,
+                                          reply_markup=kb, message_thread_id=message_thread_id)
                 return True
-            await _send_oversized_notice(sender, tg_user_id, header_text, reply_markup=kb)
+            await _send_oversized_notice(sender, chat_id, header_text,
+                                         reply_markup=kb, message_thread_id=message_thread_id)
             return True
-        await sender.send(tg_user_id, f"{header_text}\n<i>[стикер]</i>", reply_markup=kb)
+        await sender.send(chat_id, f"{header_text}\n<i>[стикер]</i>",
+                          reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "SHARE":
@@ -386,16 +425,19 @@ async def _send_attach(
             parts.append(escape(share_url))
         if desc:
             parts.append(f"<i>{escape(desc[:200])}</i>")
-        await sender.send(tg_user_id, "\n".join(parts), reply_markup=kb)
+        await sender.send(chat_id, "\n".join(parts),
+                          reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "LOCATION":
         lat = attach.get("lat") or attach.get("latitude")
         lon = attach.get("lon") or attach.get("lng") or attach.get("longitude")
         if lat and lon:
-            await sender.send(tg_user_id, f"{header_text}\n📍 {lat}, {lon}", reply_markup=kb)
+            await sender.send(chat_id, f"{header_text}\n📍 {lat}, {lon}",
+                              reply_markup=kb, message_thread_id=message_thread_id)
         else:
-            await sender.send(tg_user_id, f"{header_text}\n<i>[геолокация]</i>", reply_markup=kb)
+            await sender.send(chat_id, f"{header_text}\n<i>[геолокация]</i>",
+                              reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "CONTACT":
@@ -404,11 +446,13 @@ async def _send_attach(
         text = f"{header_text}\n👤 {escape(name)}"
         if phone:
             text += f" — {escape(phone)}"
-        await sender.send(tg_user_id, text, reply_markup=kb)
+        await sender.send(chat_id, text,
+                          reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     log.info("Unknown attach type %s, sending as info", atype)
-    await sender.send(tg_user_id, f"{header_text}\n<i>[вложение: {escape(atype or 'unknown')}]</i>", reply_markup=kb)
+    await sender.send(chat_id, f"{header_text}\n<i>[вложение: {escape(atype or 'unknown')}]</i>",
+                      reply_markup=kb, message_thread_id=message_thread_id)
     return True
 
 
@@ -419,8 +463,9 @@ async def _handle_linked_message(
     client: MaxClient,
     sender: TelegramSender,
     resolver: ContactResolver,
-    tg_user_id: int,
+    chat_id: int,
     kb=None,
+    message_thread_id: int | None = None,
 ) -> None:
     """Handle FORWARD or REPLY link inside a message."""
     inner = link.get("message") or link
@@ -449,8 +494,9 @@ async def _handle_linked_message(
         header_text=full_header,
         client=client,
         sender=sender,
-        tg_user_id=tg_user_id,
+        chat_id=chat_id,
         kb=kb,
+        message_thread_id=message_thread_id,
     )
 
 
@@ -470,7 +516,10 @@ def create_max_client(
     sender: TelegramSender,
     stats_callback: Callable[[str], Awaitable[None]] | None = None,
     account_label: str = "",
-    debug: bool = False, reply_enabled: bool = False,
+    debug: bool = False,
+    reply_enabled: bool = False,
+    storage: Storage | None = None,
+    settings: Settings | None = None,
 ) -> MaxClient:
     client = MaxClient(token=max_token, device_id=max_device_id, debug=debug, account_id=account_id)
     resolver = ContactResolver(client=client)
@@ -546,13 +595,49 @@ def create_max_client(
             except Exception:
                 log.exception("Failed to write report metric=%s", incoming_metric)
 
+        # --- НОВАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ЧАТА И ТОПИКА ---
+        target_chat_id = tg_user_id
+        message_thread_id = None
+
+        if settings and settings.tg_supergroup_id and settings.forum_enabled and storage:
+            # Используем супергруппу
+            target_chat_id = int(settings.tg_supergroup_id)
+
+            # Получаем или создаём топик для этого max_chat_id
+            max_chat_id_str = str(msg.chat_id)
+            topic_id = await storage.get_topic_id(max_chat_id_str)
+
+            if topic_id is None:
+                # Создаём топик
+                try:
+                    topic = await sender.bot.create_forum_topic(
+                        chat_id=target_chat_id,
+                        name=chat_label  # имя контакта
+                    )
+                    topic_id = topic.message_thread_id
+                    await storage.save_topic_mapping(max_chat_id_str, topic_id, chat_label)
+                    log.info("Created topic for chat %s (topic_id=%d)", max_chat_id_str, topic_id)
+                except Exception as e:
+                    log.exception("Failed to create topic for chat %s", msg.chat_id)
+                    # Если не удалось создать топик, отправляем в общий чат без thread_id
+                    topic_id = None
+
+            message_thread_id = topic_id
+        else:
+            # Старый режим: отправка в личный чат
+            target_chat_id = tg_user_id
+            message_thread_id = None
+
+        # --- ОТПРАВКА С УЧЁТОМ ТОПИКА ---
         link = msg.link
         link_type = link.get("type") if isinstance(link, dict) else None
 
         if link_type in ("FORWARD", "REPLY"):
-            await _handle_linked_message(link, link_type, header_text, client, sender, resolver, tg_user_id, kb=kb)
+            await _handle_linked_message(link, link_type, header_text, client, sender, resolver,
+                                         target_chat_id, kb=kb, message_thread_id=message_thread_id)
             if msg.text:
-                await sender.send(tg_user_id, f"{header_text}\n{escape(msg.text)}", reply_markup=kb)
+                await sender.send(target_chat_id, f"{header_text}\n{escape(msg.text)}",
+                                  reply_markup=kb, message_thread_id=message_thread_id)
             log.info("Forwarded link type=%s -> TG", link_type)
             return
 
@@ -563,12 +648,14 @@ def create_max_client(
                 header_text=header_text,
                 client=client,
                 sender=sender,
-                tg_user_id=tg_user_id,
+                chat_id=target_chat_id,
                 kb=kb,
+                message_thread_id=message_thread_id,
             )
         else:
             body = escape(msg.text) if msg.text else "<i>[нетекстовое сообщение]</i>"
-            await sender.send(tg_user_id, f"{header_text}\n{body}", reply_markup=kb)
+            await sender.send(target_chat_id, f"{header_text}\n{body}",
+                              reply_markup=kb, message_thread_id=message_thread_id)
             log.info("Forwarded text -> TG")
 
     return client
