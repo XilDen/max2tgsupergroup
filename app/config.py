@@ -10,7 +10,9 @@ from app.time_utils import DEFAULT_APP_TIMEZONE, load_timezone, normalize_timezo
 class Settings:
     tg_bot_token: str
     tg_admin_id: int
-    tg_chat_id: str | None
+    tg_chat_id: str | None           # fallback чат (если супергруппа не используется)
+    tg_supergroup_id: str | None     # ID супергруппы для форума/топиков
+    forum_enabled: bool              # включены ли топики в супергруппе
     db_path: str
     redis_url: str | None
     redis_key_prefix: str
@@ -42,10 +44,19 @@ def load_settings() -> Settings:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
+    # Читаем супергруппу и флаг форума
+    supergroup_id = os.environ.get("TG_SUPERGROUP_ID") or None
+    forum_enabled = os.environ.get("FORUM_ENABLED", "true").lower() in ("1", "true", "yes")
+    # Если супергруппа не задана, принудительно отключаем форум
+    if not supergroup_id:
+        forum_enabled = False
+        
     return Settings(
         tg_bot_token=os.environ["TG_BOT_TOKEN"],
         tg_admin_id=int(os.environ["TG_ADMIN_ID"]),
         tg_chat_id=os.environ.get("TG_CHAT_ID") or None,
+        tg_supergroup_id=supergroup_id,
+        forum_enabled=forum_enabled,
         db_path=os.environ.get("DB_PATH", "data/max2tg.sqlite3"),
         redis_url=os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0"),
         redis_key_prefix=os.environ.get("REDIS_KEY_PREFIX", "max2tg"),
