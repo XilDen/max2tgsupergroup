@@ -105,6 +105,23 @@ class Storage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_daily_report_stats_day ON daily_report_stats(day)"
             )
+
+          # Новая таблица для топиков супергруппы
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS topic_mappings (
+                    max_chat_id TEXT PRIMARY KEY,
+                    topic_id INTEGER NOT NULL,
+                    topic_name TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_message_time TEXT
+                )
+                """
+            )
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_topic_mappings_topic_id ON topic_mappings(topic_id)"
+            )
+            
             await self._ensure_column(db, "tg_users", "terms_accepted_at", "TEXT")
             # Migrate legacy consents table into tg_users.terms_accepted_at when present.
             consent_exists_cur = await db.execute(
@@ -518,3 +535,72 @@ class Storage:
             )
             cur_day += timedelta(days=1)
         return result
+
+# ==================== Методы для работы с топиками ====================
+
+    async def get_topic_id(self, max_chat_id: str) -> int | None:
+        """Возвращает topic_id для данного чата Max или None."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT topic_id FROM topic_mappings WHERE max_chat_id = ?",
+                (max_chat_id,),
+            )
+            row = await cur.fetchone()
+            return int(row["topic_id"]) if row else None
+
+    async def save_topic_mapping(self, max_chat_id: str, topic_id: int, topic_name: str = "") -> None:
+        """Сохраняет или обновляет связку чата Max с топиком."""
+        ts = self._local_timestamp()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO topic_mappings (max_chat_id, topic_id, topic_name, created_at, last_message_time)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(max_chat_id) DO UPDATE SET
+                    topic_id = excluded.topic_id,
+                    topic_name = excluded.topic_name,
+                    last_message_time = excluded.last_message_time
+                """,
+                (max_chat_id, topic_id, topic_name, ts, ts),
+            )
+            await db.commit()
+
+    async def get_max_chat_id_by_topic(self, topic_id: int) -> str | None:
+        """По topic_id найти max_chat_id."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT max_chat_id FROM topic_mappings WHERE topic_id = ?",
+                (topic_id,),
+            )
+            row = await cur.fetchone()
+            return str(row["max_chat_id"]) if row else None
+
+    async def update_topic_name(self, max_chat_id: str, new_name: str) -> None:
+        """Обновить имя топика."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE topic_mappings SET topic_name = ? WHERE max_chat_id = ?",
+                (new_name, max_chat_id),
+            )
+            await db.commit()
+
+    async def delete_topic_mapping(self, max_chat_id: str) -> None:
+        """Удалить запись о топике (например, при закрытии)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "DELETE FROM topic_mappings WHERE max_chat_id = ?",
+                (max_chat_id,),
+            )
+            await db.commit()
+
+    async def list_all_topic_mappings(self) -> list[dict]:
+        """Получить все связки (для команды /list)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT max_chat_id, topic_id, topic_name, created_at, last_message_time FROM topic_mappings ORDER BY created_at DESC",
+            )
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
