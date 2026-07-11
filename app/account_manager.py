@@ -16,6 +16,7 @@ from app.storage import (
     Storage,
     TgUserRecord,
 )
+from app.config import Settings  # новый импорт
 
 log = logging.getLogger(__name__)
 
@@ -42,11 +43,13 @@ class AccountManager:
         self,
         storage: Storage,
         sender: Any,
+        settings: Settings,  # новый параметр
         debug: bool = False,
         reply_enabled: bool = False,
     ):
         self._storage = storage
         self._sender = sender
+        self._settings = settings  # сохраняем
         self._debug = debug
         self._reply_enabled = reply_enabled
         self._runtimes: dict[int, AccountRuntime] = {}
@@ -197,6 +200,8 @@ class AccountManager:
                 account_label=label,
                 debug=self._debug,
                 reply_enabled=self._reply_enabled,
+                storage=self._storage,      # передаём storage
+                settings=self._settings,    # передаём settings
             )
             task = asyncio.create_task(client.run(), name=f"max-client-{record.id}")
             self._runtimes[record.id] = AccountRuntime(record=record, client=client, task=task)
