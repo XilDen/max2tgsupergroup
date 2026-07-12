@@ -108,15 +108,17 @@ class Storage:
                 "CREATE INDEX IF NOT EXISTS idx_daily_report_stats_day ON daily_report_stats(day)"
             )
             await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS topic_mappings (
-                    max_chat_id TEXT PRIMARY KEY,
-                    topic_id INTEGER NOT NULL,
-                    topic_name TEXT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    last_message_time TEXT
-                )
-                """
+                 """
+                 CREATE TABLE IF NOT EXISTS topic_mappings (
+                     max_chat_id TEXT NOT NULL,
+                     supergroup_id TEXT NOT NULL,
+                     topic_id INTEGER NOT NULL,
+                     topic_name TEXT,
+                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                     last_message_time TEXT,
+                     PRIMARY KEY (max_chat_id, supergroup_id)
+                 )
+                 """
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_topic_mappings_topic_id ON topic_mappings(topic_id)"
