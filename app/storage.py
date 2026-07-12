@@ -194,13 +194,16 @@ class Storage:
 
     @staticmethod
     def _row_to_user(row: Any) -> TgUserRecord:
+        # Преобразуем в dict для универсальности
+        if not isinstance(row, dict):
+            row = dict(row)
         return TgUserRecord(
             tg_user_id=int(row["tg_user_id"]),
             is_active=bool(row["is_active"]),
             created_at=str(row["created_at"]),
-            terms_accepted_at=str(row["terms_accepted_at"]) if row["terms_accepted_at"] else None,
-            activated_at=str(row["activated_at"]) if row["activated_at"] else None,
-            accounts_count=int(row["accounts_count"]) if "accounts_count" in row.keys() else 0,
+            terms_accepted_at=str(row["terms_accepted_at"]) if row.get("terms_accepted_at") else None,
+            activated_at=str(row["activated_at"]) if row.get("activated_at") else None,
+            accounts_count=int(row["accounts_count"]) if "accounts_count" in row else 0,
             supergroup_id=str(row["supergroup_id"]) if row.get("supergroup_id") else None,
         )
 
@@ -621,7 +624,6 @@ class Storage:
             await db.commit()
 
     async def get_user_supergroup(self, tg_user_id: int) -> str | None:
-        """Получить supergroup_id пользователя."""
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
@@ -629,4 +631,6 @@ class Storage:
                 (tg_user_id,)
             )
             row = await cur.fetchone()
-            return str(row["supergroup_id"]) if row and row["supergroup_id"] else None
+            if row and row["supergroup_id"]:
+                return str(row["supergroup_id"])
+            return None
