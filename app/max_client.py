@@ -541,8 +541,8 @@ class MaxClient:
         log.info("send_media account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
         return resp
 
-    async def send_message(self, chat_id, text: str) -> dict:
-        """Отправляет текстовое сообщение."""
+    async def send_message(self, chat_id, text: str, reply_to: str | None = None) -> dict:
+        """Отправляет текстовое сообщение с возможностью ответа на другое сообщение."""
         try:
             chat_id_int = int(chat_id)
         except (ValueError, TypeError):
@@ -556,8 +556,10 @@ class MaxClient:
             },
             "notify": True,
         }
+        if reply_to:
+            payload["message"]["replyTo"] = reply_to
         resp = await self.cmd(OpCode.SEND_MESSAGE, payload)
-        log.info("send_message account=%s chat=%s -> %s", self.account_id, chat_id, "OK" if resp else "FAIL")
+        log.info("send_message account=%s chat=%s reply_to=%s -> %s", self.account_id, chat_id, reply_to, "OK" if resp else "FAIL")
         return resp
 
     # ── message parsing ────────────────────────────────────────────
