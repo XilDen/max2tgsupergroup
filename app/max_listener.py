@@ -680,6 +680,7 @@ def create_max_client(
         if not use_header and current_supergroup_id:
             max_chat_id_str = str(msg.chat_id)
             topic_id = await storage.get_topic_id(max_chat_id_str, current_supergroup_id)
+            log.debug("get_topic_id result: %s for max_chat_id=%s, supergroup_id=%s", topic_id, max_chat_id_str, current_supergroup_id)
             if topic_id is None:
                 # Определяем имя топика
                 if is_dm:
