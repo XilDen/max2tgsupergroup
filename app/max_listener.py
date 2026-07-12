@@ -7,8 +7,6 @@ from app.max_client import MAX_FILE_DOWNLOAD_BYTES, MAX_IMAGE_DOWNLOAD_BYTES, Ma
 from app.privacy import mask_mapping_values
 from app.resolver import ContactResolver
 from app.tg_sender import TelegramSender, reply_keyboard
-
-# Импортируем для работы с супергруппой
 from app.storage import Storage
 from app.config import Settings
 
@@ -220,14 +218,19 @@ async def _send_attaches(
     chat_id: int,
     kb=None,
     message_thread_id: int | None = None,
+    sender_prefix: str = "",
 ) -> None:
     meaningful_attaches = _meaningful_attaches(attaches)
     if not meaningful_attaches:
         if text:
-            await sender.send(chat_id, f"{header_text}\n{escape(text)}",
+            body = escape(text)
+            if sender_prefix:
+                body = f"{sender_prefix}{body}"
+            full_text = f"{header_text}\n{body}" if header_text else body
+            await sender.send(chat_id, full_text,
                               reply_markup=kb, message_thread_id=message_thread_id)
         else:
-            await sender.send(chat_id, f"{header_text}\n<i>[без содержимого]</i>",
+            await sender.send(chat_id, f"{header_text}\n<i>[без содержимого]</i>" if header_text else "<i>[без содержимого]</i>",
                               reply_markup=kb, message_thread_id=message_thread_id)
         return
     skipped_count = max(0, len(meaningful_attaches) - MAX_ATTACHMENTS_PER_MESSAGE)
@@ -248,7 +251,15 @@ async def _send_attaches(
         album_candidates.append(prepared)
         album_indexes.append(idx)
 
-    caption = f"{header_text}\n{escape(text)}" if text else header_text
+    # Формируем caption
+    if text:
+        body = escape(text)
+        if sender_prefix:
+            body = f"{sender_prefix}{body}"
+        caption = f"{header_text}\n{body}" if header_text else body
+    else:
+        caption = header_text
+
     used_album = False
 
     album_index_set = set(album_indexes[:10])
@@ -268,8 +279,12 @@ async def _send_attaches(
         cap = header_text
         if not used_album and i == 0 and text:
             cap = caption
+        else:
+            # Для остальных вложений добавляем префикс только если он есть
+            if sender_prefix and not cap:
+                cap = sender_prefix + cap if cap else sender_prefix
         await _send_attach(attach, client, sender, chat_id, cap, kb=kb,
-                           message_thread_id=message_thread_id)
+                           message_thread_id=message_thread_id, sender_prefix=sender_prefix if not used_album and i == 0 else "")
         log.debug("Forwarded attach _type=%s -> TG", attach.get("_type"))
     if skipped_count:
         await sender.send(
@@ -287,6 +302,7 @@ async def _send_attach(
     header_text: str,
     kb=None,
     message_thread_id: int | None = None,
+    sender_prefix: str = "",
 ) -> bool:
     """Process and send a single attachment. Returns True if handled."""
     atype = attach.get("_type", "")
@@ -306,7 +322,9 @@ async def _send_attach(
             return True
         data = await _download_limited(client, url, "photo")
         if data:
-            await sender.send_photo(chat_id, data, caption=header_text,
+            # Добавляем префикс к caption
+            caption = f"{sender_prefix}{header_text}" if sender_prefix else header_text
+            await sender.send_photo(chat_id, data, caption=caption,
                                     reply_markup=kb, message_thread_id=message_thread_id)
             return True
         await _send_oversized_notice(sender, chat_id, header_text,
@@ -320,7 +338,8 @@ async def _send_attach(
             return True
         data, filename = await _download_video_with_fallback(attach, client)
         if data:
-            sent = await sender.send_video(chat_id, data, caption=header_text,
+            caption = f"{sender_prefix}{header_text}" if sender_prefix else header_text
+            sent = await sender.send_video(chat_id, data, caption=caption,
                                            filename=filename, reply_markup=kb,
                                            message_thread_id=message_thread_id)
             if sent:
@@ -330,8 +349,9 @@ async def _send_attach(
         if thumb:
             data = await _download_limited(client, thumb, "photo")
             if data:
+                cap = f"{sender_prefix}{header_text}" if sender_prefix else header_text
                 await sender.send_photo(
-                    chat_id, data, caption=f"{header_text}\n<i>[видео — превью]</i>",
+                    chat_id, data, caption=f"{cap}\n<i>[видео — превью]</i>",
                     reply_markup=kb, message_thread_id=message_thread_id
                 )
                 return True
@@ -351,20 +371,21 @@ async def _send_attach(
                 return True
             data = await _download_limited(client, token_url, kind)
             if data:
+                caption = f"{sender_prefix}{header_text}" if sender_prefix else header_text
                 if kind == "photo":
-                    await sender.send_photo(chat_id, data, caption=header_text,
+                    await sender.send_photo(chat_id, data, caption=caption,
                                             filename=name, reply_markup=kb,
                                             message_thread_id=message_thread_id)
                 elif kind == "video":
-                    sent = await sender.send_video(chat_id, data, caption=header_text,
+                    sent = await sender.send_video(chat_id, data, caption=caption,
                                                    filename=name, reply_markup=kb,
                                                    message_thread_id=message_thread_id)
                     if not sent:
-                        await sender.send_document(chat_id, data, caption=header_text,
+                        await sender.send_document(chat_id, data, caption=caption,
                                                    filename=name, reply_markup=kb,
                                                    message_thread_id=message_thread_id)
                 else:
-                    await sender.send_document(chat_id, data, caption=header_text,
+                    await sender.send_document(chat_id, data, caption=caption,
                                                filename=name, reply_markup=kb,
                                                message_thread_id=message_thread_id)
                 return True
@@ -372,7 +393,10 @@ async def _send_attach(
                                          reply_markup=kb, message_thread_id=message_thread_id)
             return True
         size_str = f" ({_human_size(size)})" if size else ""
-        await sender.send(chat_id, f"{header_text}\n📎 <b>{escape(name)}</b>{size_str}",
+        text = f"{header_text}\n📎 <b>{escape(name)}</b>{size_str}"
+        if sender_prefix:
+            text = f"{sender_prefix}{text}"
+        await sender.send(chat_id, text,
                           reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
@@ -385,13 +409,17 @@ async def _send_attach(
                 return True
             data = await _download_limited(client, url, "document")
             if data:
-                await sender.send_voice(chat_id, data, caption=header_text,
+                caption = f"{sender_prefix}{header_text}" if sender_prefix else header_text
+                await sender.send_voice(chat_id, data, caption=caption,
                                         reply_markup=kb, message_thread_id=message_thread_id)
                 return True
             await _send_oversized_notice(sender, chat_id, header_text,
                                          reply_markup=kb, message_thread_id=message_thread_id)
             return True
-        await sender.send(chat_id, f"{header_text}\n<i>[аудио]</i>",
+        text = f"{header_text}\n<i>[аудио]</i>"
+        if sender_prefix:
+            text = f"{sender_prefix}{text}"
+        await sender.send(chat_id, text,
                           reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
@@ -410,7 +438,10 @@ async def _send_attach(
             await _send_oversized_notice(sender, chat_id, header_text,
                                          reply_markup=kb, message_thread_id=message_thread_id)
             return True
-        await sender.send(chat_id, f"{header_text}\n<i>[стикер]</i>",
+        text = f"{header_text}\n<i>[стикер]</i>"
+        if sender_prefix:
+            text = f"{sender_prefix}{text}"
+        await sender.send(chat_id, text,
                           reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
@@ -425,7 +456,10 @@ async def _send_attach(
             parts.append(escape(share_url))
         if desc:
             parts.append(f"<i>{escape(desc[:200])}</i>")
-        await sender.send(chat_id, "\n".join(parts),
+        text = "\n".join(parts)
+        if sender_prefix:
+            text = f"{sender_prefix}{text}"
+        await sender.send(chat_id, text,
                           reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
@@ -433,11 +467,13 @@ async def _send_attach(
         lat = attach.get("lat") or attach.get("latitude")
         lon = attach.get("lon") or attach.get("lng") or attach.get("longitude")
         if lat and lon:
-            await sender.send(chat_id, f"{header_text}\n📍 {lat}, {lon}",
-                              reply_markup=kb, message_thread_id=message_thread_id)
+            text = f"{header_text}\n📍 {lat}, {lon}"
         else:
-            await sender.send(chat_id, f"{header_text}\n<i>[геолокация]</i>",
-                              reply_markup=kb, message_thread_id=message_thread_id)
+            text = f"{header_text}\n<i>[геолокация]</i>"
+        if sender_prefix:
+            text = f"{sender_prefix}{text}"
+        await sender.send(chat_id, text,
+                          reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     if atype == "CONTACT":
@@ -446,12 +482,17 @@ async def _send_attach(
         text = f"{header_text}\n👤 {escape(name)}"
         if phone:
             text += f" — {escape(phone)}"
+        if sender_prefix:
+            text = f"{sender_prefix}{text}"
         await sender.send(chat_id, text,
                           reply_markup=kb, message_thread_id=message_thread_id)
         return True
 
     log.info("Unknown attach type %s, sending as info", atype)
-    await sender.send(chat_id, f"{header_text}\n<i>[вложение: {escape(atype or 'unknown')}]</i>",
+    text = f"{header_text}\n<i>[вложение: {escape(atype or 'unknown')}]</i>"
+    if sender_prefix:
+        text = f"{sender_prefix}{text}"
+    await sender.send(chat_id, text,
                       reply_markup=kb, message_thread_id=message_thread_id)
     return True
 
@@ -466,6 +507,7 @@ async def _handle_linked_message(
     chat_id: int,
     kb=None,
     message_thread_id: int | None = None,
+    sender_prefix: str = "",
 ) -> None:
     """Handle FORWARD or REPLY link inside a message."""
     inner = link.get("message") or link
@@ -486,7 +528,10 @@ async def _handle_linked_message(
         if fwd_sender_label:
             prefix = f"↩ <b>Ответ на {fwd_sender_label}</b>"
 
-    full_header = f"{header_text}\n{prefix}"
+    # Добавляем sender_prefix к header_text, если он есть
+    full_header = f"{sender_prefix}{header_text}" if sender_prefix else header_text
+    if prefix:
+        full_header = f"{full_header}\n{prefix}" if full_header else prefix
 
     await _send_attaches(
         attaches=fwd_attaches,
@@ -497,6 +542,7 @@ async def _handle_linked_message(
         chat_id=chat_id,
         kb=kb,
         message_thread_id=message_thread_id,
+        sender_prefix="",  # уже добавили выше
     )
 
 
@@ -576,7 +622,7 @@ def create_max_client(
             sender_label = escape(sender_name if not sender_missing else "Неизвестный")
         chat_label = escape(resolver.chat_name(msg.chat_id))
         header_text = _header(sender_label, chat_label, is_dm, account_label=account_label)
-        
+
         # --- ФОРМИРОВАНИЕ КНОПКИ "ОТВЕТИТЬ" (только если не супергруппа) ---
         if settings and settings.tg_supergroup_id and settings.forum_enabled:
             # В супергруппе с топиками кнопка не нужна
@@ -601,16 +647,35 @@ def create_max_client(
             except Exception:
                 log.exception("Failed to write report metric=%s", incoming_metric)
 
-       # --- НОВАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ЧАТА И ТОПИКА ---
+        # --- ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО ЧАТА (личный чат или супергруппа) ---
         target_chat_id = tg_user_id
         message_thread_id = None
-        use_header = True  # по умолчанию показываем заголовок
+        use_header = True
 
-        if settings and settings.tg_supergroup_id and settings.forum_enabled and storage:
+        # Проверяем, есть ли у пользователя своя супергруппа
+        user_supergroup = None
+        if storage and tg_user_id:
+            user_supergroup = await storage.get_user_supergroup(tg_user_id)
+            log.debug("User %s supergroup: %s", tg_user_id, user_supergroup)
+
+        if user_supergroup and settings and settings.forum_enabled:
+            target_chat_id = int(user_supergroup)
+            use_header = False
+            log.debug("Using user's supergroup: %s", user_supergroup)
+        elif settings and settings.tg_supergroup_id and settings.forum_enabled:
             target_chat_id = int(settings.tg_supergroup_id)
+            use_header = False
+            log.debug("Using global supergroup: %s", settings.tg_supergroup_id)
+        else:
+            # fallback – личный чат
+            target_chat_id = tg_user_id
+            use_header = True
+            log.debug("No supergroup, using private chat: %s", tg_user_id)
+
+        # Если супергруппа используется, получаем или создаём топик
+        if not use_header:
             max_chat_id_str = str(msg.chat_id)
             topic_id = await storage.get_topic_id(max_chat_id_str)
-
             if topic_id is None:
                 # Определяем имя топика
                 if is_dm:
@@ -628,15 +693,14 @@ def create_max_client(
                 except Exception as e:
                     log.exception("Failed to create topic for chat %s", msg.chat_id)
                     topic_id = None
-
             message_thread_id = topic_id
-            # В супергруппе заголовок не нужен
-            use_header = False
         else:
-            # Старый режим: отправка в личный чат
-            target_chat_id = tg_user_id
             message_thread_id = None
-            use_header = True
+
+        # --- ФОРМИРОВАНИЕ ПРЕФИКСА ДЛЯ ГРУППОВЫХ ЧАТОВ ---
+        sender_prefix = ""
+        if not use_header and not is_dm and not is_channel and sender_label:
+            sender_prefix = f"👤 <b>{sender_label}</b>: "
 
         # --- ОТПРАВКА С УЧЁТОМ ТОПИКА ---
         final_header_text = header_text if use_header else ""
@@ -647,10 +711,13 @@ def create_max_client(
         if link_type in ("FORWARD", "REPLY"):
             await _handle_linked_message(
                 link, link_type, final_header_text, client, sender, resolver,
-                target_chat_id, kb=kb, message_thread_id=message_thread_id
+                target_chat_id, kb=kb, message_thread_id=message_thread_id,
+                sender_prefix=sender_prefix
             )
             if msg.text:
                 body = escape(msg.text)
+                if sender_prefix:
+                    body = f"{sender_prefix}{body}"
                 text_to_send = f"{final_header_text}\n{body}" if final_header_text else body
                 await sender.send(
                     target_chat_id, text_to_send,
@@ -669,9 +736,12 @@ def create_max_client(
                 chat_id=target_chat_id,
                 kb=kb,
                 message_thread_id=message_thread_id,
+                sender_prefix=sender_prefix,
             )
         else:
             body = escape(msg.text) if msg.text else "<i>[нетекстовое сообщение]</i>"
+            if sender_prefix:
+                body = f"{sender_prefix}{body}"
             text_to_send = f"{final_header_text}\n{body}" if final_header_text else body
             await sender.send(
                 target_chat_id, text_to_send,
