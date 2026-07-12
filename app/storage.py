@@ -125,6 +125,7 @@ class Storage:
             # Убедимся, что колонка supergroup_id есть (для миграции старых БД)
             await self._ensure_column(db, "tg_users", "supergroup_id", "TEXT")
             await self._ensure_column(db, "tg_users", "terms_accepted_at", "TEXT")
+            await self._ensure_column(db, "topic_mappings", "supergroup_id", "TEXT")
 
             # Migrate legacy consents table into tg_users.terms_accepted_at when present.
             consent_exists_cur = await db.execute(
@@ -545,31 +546,32 @@ class Storage:
 
     # ==================== Методы для работы с топиками ====================
 
-    async def get_topic_id(self, max_chat_id: str) -> int | None:
-        """Возвращает topic_id для данного чата Max или None."""
+    async def get_topic_id(self, max_chat_id: str, supergroup_id: str) -> int | None:
+        """Возвращает topic_id для данного чата Max в указанной супергруппе."""
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT topic_id FROM topic_mappings WHERE max_chat_id = ?",
-                (max_chat_id,),
+                "SELECT topic_id FROM topic_mappings WHERE max_chat_id = ? AND supergroup_id = ?",
+                (max_chat_id, supergroup_id),
             )
             row = await cur.fetchone()
             return int(row["topic_id"]) if row else None
 
-    async def save_topic_mapping(self, max_chat_id: str, topic_id: int, topic_name: str = "") -> None:
-        """Сохраняет или обновляет связку чата Max с топиком."""
+    async def save_topic_mapping(self, max_chat_id: str, topic_id: int, topic_name: str, supergroup_id: str) -> None:
+        """Сохраняет связку чата Max с топиком в конкретной супергруппе."""
         ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
                 """
-                INSERT INTO topic_mappings (max_chat_id, topic_id, topic_name, created_at, last_message_time)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO topic_mappings (max_chat_id, topic_id, topic_name, created_at, last_message_time, supergroup_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(max_chat_id) DO UPDATE SET
                     topic_id = excluded.topic_id,
                     topic_name = excluded.topic_name,
-                    last_message_time = excluded.last_message_time
+                    last_message_time = excluded.last_message_time,
+                    supergroup_id = excluded.supergroup_id
                 """,
-                (max_chat_id, topic_id, topic_name, ts, ts),
+                (max_chat_id, topic_id, topic_name, ts, ts, supergroup_id),
             )
             await db.commit()
 
@@ -584,21 +586,19 @@ class Storage:
             row = await cur.fetchone()
             return str(row["max_chat_id"]) if row else None
 
-    async def update_topic_name(self, max_chat_id: str, new_name: str) -> None:
-        """Обновить имя топика."""
+    async def update_topic_name(self, max_chat_id: str, new_name: str, supergroup_id: str) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
-                "UPDATE topic_mappings SET topic_name = ? WHERE max_chat_id = ?",
-                (new_name, max_chat_id),
+                "UPDATE topic_mappings SET topic_name = ? WHERE max_chat_id = ? AND supergroup_id = ?",
+                (new_name, max_chat_id, supergroup_id),
             )
             await db.commit()
 
-    async def delete_topic_mapping(self, max_chat_id: str) -> None:
-        """Удалить запись о топике (например, при закрытии)."""
+    async def delete_topic_mapping(self, max_chat_id: str, supergroup_id: str) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
-                "DELETE FROM topic_mappings WHERE max_chat_id = ?",
-                (max_chat_id,),
+                "DELETE FROM topic_mappings WHERE max_chat_id = ? AND supergroup_id = ?",
+                (max_chat_id, supergroup_id),
             )
             await db.commit()
 
