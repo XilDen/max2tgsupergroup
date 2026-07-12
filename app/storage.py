@@ -38,7 +38,6 @@ class TgUserRecord:
     terms_accepted_at: str | None
     activated_at: str | None
     accounts_count: int = 0
-    supergroup_id: str | None = None  # НОВОЕ ПОЛЕ
 
 
 @dataclass(frozen=True)
@@ -76,8 +75,7 @@ class Storage:
                     is_active INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     terms_accepted_at TEXT,
-                    activated_at TEXT,
-                    supergroup_id TEXT    -- НОВАЯ КОЛОНКА
+                    activated_at TEXT
                 )
                 """
             )
@@ -107,6 +105,8 @@ class Storage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_daily_report_stats_day ON daily_report_stats(day)"
             )
+
+          # Новая таблица для топиков супергруппы
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS topic_mappings (
@@ -121,11 +121,8 @@ class Storage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_topic_mappings_topic_id ON topic_mappings(topic_id)"
             )
-
-            # Убедимся, что колонка supergroup_id есть (для миграции старых БД)
-            await self._ensure_column(db, "tg_users", "supergroup_id", "TEXT")
+            
             await self._ensure_column(db, "tg_users", "terms_accepted_at", "TEXT")
-
             # Migrate legacy consents table into tg_users.terms_accepted_at when present.
             consent_exists_cur = await db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tg_user_consents' LIMIT 1"
@@ -201,7 +198,6 @@ class Storage:
             terms_accepted_at=str(row["terms_accepted_at"]) if row["terms_accepted_at"] else None,
             activated_at=str(row["activated_at"]) if row["activated_at"] else None,
             accounts_count=int(row["accounts_count"]) if "accounts_count" in row.keys() else 0,
-            supergroup_id=str(row["supergroup_id"]) if row.get("supergroup_id") else None,  # НОВОЕ
         )
 
     async def ensure_user(self, tg_user_id: int) -> TgUserRecord:
@@ -234,26 +230,377 @@ class Storage:
             row = await cur.fetchone()
             return self._row_to_user(row) if row else None
 
-    async def set_user_supergroup(self, tg_user_id: int, supergroup_id: str | None) -> None:
-        """Установить supergroup_id для пользователя."""
+    async def activate_user(self, tg_user_id: int) -> TgUserRecord:
+        ts = self._local_timestamp()
         async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
             await db.execute(
-                "UPDATE tg_users SET supergroup_id = ? WHERE tg_user_id = ?",
-                (supergroup_id, tg_user_id)
+                """
+                INSERT INTO tg_users (tg_user_id, is_active, created_at, activated_at)
+                VALUES (?, 1, ?, ?)
+                ON CONFLICT(tg_user_id) DO UPDATE SET
+                    is_active=1,
+                    activated_at=?
+                """,
+                (tg_user_id, ts, ts, ts),
             )
             await db.commit()
+            cur = await db.execute(
+                "SELECT * FROM tg_users WHERE tg_user_id = ?",
+                (tg_user_id,),
+            )
+            row = await cur.fetchone()
+            return self._row_to_user(row)
 
-    async def get_user_supergroup(self, tg_user_id: int) -> str | None:
-        """Получить supergroup_id пользователя."""
+    async def deactivate_user(self, tg_user_id: int) -> TgUserRecord:
+        ts = self._local_timestamp()
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute(
+                """
+                INSERT INTO tg_users (tg_user_id, is_active, created_at, activated_at)
+                VALUES (?, 0, ?, NULL)
+                ON CONFLICT(tg_user_id) DO UPDATE SET
+                    is_active=0,
+                    activated_at=NULL
+                """,
+                (tg_user_id, ts),
+            )
+            await db.commit()
+            cur = await db.execute(
+                "SELECT * FROM tg_users WHERE tg_user_id = ?",
+                (tg_user_id,),
+            )
+            row = await cur.fetchone()
+            return self._row_to_user(row)
+
+    async def list_users_page(self, page: int = 1, page_size: int = 10) -> tuple[list[TgUserRecord], int]:
+        page = max(1, page)
+        page_size = max(1, min(page_size, 10))
+        offset = (page - 1) * page_size
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            total_cur = await db.execute("SELECT COUNT(*) AS cnt FROM tg_users")
+            total_row = await total_cur.fetchone()
+            total = int(total_row["cnt"]) if total_row else 0
+            cur = await db.execute(
+                """
+                SELECT
+                    u.tg_user_id,
+                    u.is_active,
+                    u.created_at,
+                    u.terms_accepted_at,
+                    u.activated_at,
+                    COUNT(a.id) as accounts_count
+                FROM tg_users u
+                LEFT JOIN max_accounts a
+                    ON a.tg_user_id = u.tg_user_id AND a.is_active = 1
+                GROUP BY u.tg_user_id, u.is_active, u.created_at, u.terms_accepted_at, u.activated_at
+                ORDER BY u.created_at DESC
+                LIMIT ? OFFSET ?
+                """
+                ,
+                (page_size, offset),
+            )
+            rows = await cur.fetchall()
+            return [self._row_to_user(row) for row in rows], total
+
+    async def add_account(
+        self,
+        tg_user_id: int,
+        max_token: str,
+        max_device_id: str,
+        title: str = "",
+    ) -> MaxAccountRecord:
+        return await self.add_account_checked(
+            tg_user_id=tg_user_id,
+            max_token=max_token,
+            max_device_id=max_device_id,
+            title=title,
+            max_active_bindings=None,
+        )
+
+    async def add_account_checked(
+        self,
+        tg_user_id: int,
+        max_token: str,
+        max_device_id: str,
+        title: str = "",
+        max_active_bindings: int | None = None,
+    ) -> MaxAccountRecord:
+        enc_token = self._box.encrypt(max_token)
+        enc_device_id = self._box.encrypt(max_device_id)
+        ts = self._local_timestamp()
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                consent_cur = await db.execute(
+                    "SELECT 1 FROM tg_users WHERE tg_user_id = ? AND terms_accepted_at IS NOT NULL LIMIT 1",
+                    (tg_user_id,),
+                )
+                if await consent_cur.fetchone() is None:
+                    raise PermissionError("Terms are not accepted")
+
+                existing_cur = await db.execute(
+                    """
+                    SELECT * FROM max_accounts
+                    WHERE tg_user_id = ? AND is_active = 1
+                    ORDER BY id ASC
+                    """,
+                    (tg_user_id,),
+                )
+                existing_rows = await existing_cur.fetchall()
+                existing_accounts = [self._row_to_account(row) for row in existing_rows]
+                for existing in existing_accounts:
+                    if existing.max_device_id == max_device_id or existing.max_token == max_token:
+                        raise DuplicateActiveAccountBindingError("Active binding already exists for this user")
+                if max_active_bindings is not None and len(existing_accounts) >= max_active_bindings:
+                    raise MaxActiveAccountLimitError(
+                        f"Maximum active MAX bindings per user is {max_active_bindings}"
+                    )
+
+                cur = await db.execute(
+                    """
+                    INSERT INTO max_accounts (tg_user_id, max_token, max_device_id, title, is_active, created_at)
+                    VALUES (?, ?, ?, ?, 1, ?)
+                    """,
+                    (tg_user_id, enc_token, enc_device_id, title, ts),
+                )
+                acc_id = int(cur.lastrowid)
+                row_cur = await db.execute(
+                    "SELECT * FROM max_accounts WHERE id = ?",
+                    (acc_id,),
+                )
+                row = await row_cur.fetchone()
+                await db.commit()
+                return self._row_to_account(row)
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def _migrate_encrypt_account_secrets(self, db: aiosqlite.Connection) -> None:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT id, max_token, max_device_id FROM max_accounts"
+        )
+        rows = await cur.fetchall()
+        for row in rows:
+            token = str(row["max_token"] or "")
+            device_id = str(row["max_device_id"] or "")
+            new_token = token if self._box.is_encrypted(token) else self._box.encrypt(token)
+            new_device_id = device_id if self._box.is_encrypted(device_id) else self._box.encrypt(device_id)
+            if new_token != token or new_device_id != device_id:
+                await db.execute(
+                    """
+                    UPDATE max_accounts
+                    SET max_token = ?, max_device_id = ?
+                    WHERE id = ?
+                    """,
+                    (new_token, new_device_id, int(row["id"])),
+                )
+
+    async def list_accounts_for_user(self, tg_user_id: int) -> list[MaxAccountRecord]:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                "SELECT supergroup_id FROM tg_users WHERE tg_user_id = ?",
-                (tg_user_id,)
+                """
+                SELECT * FROM max_accounts
+                WHERE tg_user_id = ? AND is_active = 1
+                ORDER BY id ASC
+                """,
+                (tg_user_id,),
+            )
+            rows = await cur.fetchall()
+            return [self._row_to_account(row) for row in rows]
+
+    async def list_all_active_accounts(self) -> list[MaxAccountRecord]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM max_accounts WHERE is_active = 1 ORDER BY id ASC"
+            )
+            rows = await cur.fetchall()
+            return [self._row_to_account(row) for row in rows]
+
+    async def get_account(self, account_id: int) -> MaxAccountRecord | None:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM max_accounts WHERE id = ?",
+                (account_id,),
             )
             row = await cur.fetchone()
-            return str(row["supergroup_id"]) if row and row["supergroup_id"] else None
+            return self._row_to_account(row) if row else None
 
-    # Остальные методы без изменений (activate_user, deactivate_user, list_users_page, add_account, ...)
-    # Я их не переписываю, чтобы не раздувать ответ, они остаются как были.
-    # Убедитесь, что в вашем файле они есть. В этом ответе я привожу только изменения.
+    async def deactivate_account(self, account_id: int, tg_user_id: int) -> bool:
+        async with aiosqlite.connect(self._db_path) as db:
+            cur = await db.execute(
+                """
+                UPDATE max_accounts
+                SET is_active = 0
+                WHERE id = ? AND tg_user_id = ? AND is_active = 1
+                """,
+                (account_id, tg_user_id),
+            )
+            await db.commit()
+            return cur.rowcount > 0
+
+    async def delete_accounts_for_user(self, tg_user_id: int) -> list[int]:
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT id FROM max_accounts WHERE tg_user_id = ?",
+                (tg_user_id,),
+            )
+            rows = await cur.fetchall()
+            account_ids = [int(row["id"]) for row in rows]
+            await db.execute(
+                "DELETE FROM max_accounts WHERE tg_user_id = ?",
+                (tg_user_id,),
+            )
+            await db.commit()
+            return account_ids
+
+    async def increment_daily_metric(self, metric: str, stat_day: str | None = None) -> None:
+        if metric not in {"forward_dm", "forward_group", "forward_channel", "reply_dm", "reply_group"}:
+            raise ValueError(f"Unsupported metric: {metric}")
+        day = stat_day or app_today(self._timezone_name).isoformat()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO daily_report_stats(day, metric, cnt)
+                VALUES(?, ?, 1)
+                ON CONFLICT(day, metric) DO UPDATE SET
+                    cnt = cnt + 1
+                """,
+                (day, metric),
+            )
+            await db.commit()
+        await self.cleanup_daily_metrics_if_needed()
+
+    async def cleanup_daily_metrics_if_needed(self, keep_days: int = 180) -> None:
+        keep_days = max(1, keep_days)
+        today = app_today(self._timezone_name)
+        today_str = today.isoformat()
+        if self._last_stats_cleanup_day == today_str:
+            return
+        cutoff = (today - timedelta(days=keep_days)).isoformat()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "DELETE FROM daily_report_stats WHERE day < ?",
+                (cutoff,),
+            )
+            await db.commit()
+        self._last_stats_cleanup_day = today_str
+
+    async def get_daily_report(self, days: int = 10) -> list[DailyReportRow]:
+        days = max(1, min(days, 180))
+        end_day = app_today(self._timezone_name)
+        start_day = end_day - timedelta(days=days - 1)
+
+        counters: dict[str, dict[str, int]] = {}
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """
+                SELECT day, metric, cnt
+                FROM daily_report_stats
+                WHERE day >= ? AND day <= ?
+                ORDER BY day ASC
+                """,
+                (start_day.isoformat(), end_day.isoformat()),
+            )
+            rows = await cur.fetchall()
+        for row in rows:
+            day = str(row["day"])
+            metric = str(row["metric"])
+            cnt = int(row["cnt"])
+            counters.setdefault(day, {})[metric] = cnt
+
+        result: list[DailyReportRow] = []
+        cur_day = start_day
+        while cur_day <= end_day:
+            day_str = cur_day.isoformat()
+            day_metrics = counters.get(day_str, {})
+            result.append(
+                DailyReportRow(
+                    day=day_str,
+                    forward_dm=int(day_metrics.get("forward_dm", 0)),
+                    forward_group=int(day_metrics.get("forward_group", 0)),
+                    forward_channel=int(day_metrics.get("forward_channel", 0)),
+                    reply_dm=int(day_metrics.get("reply_dm", 0)),
+                    reply_group=int(day_metrics.get("reply_group", 0)),
+                )
+            )
+            cur_day += timedelta(days=1)
+        return result
+
+# ==================== Методы для работы с топиками ====================
+
+    async def get_topic_id(self, max_chat_id: str) -> int | None:
+        """Возвращает topic_id для данного чата Max или None."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT topic_id FROM topic_mappings WHERE max_chat_id = ?",
+                (max_chat_id,),
+            )
+            row = await cur.fetchone()
+            return int(row["topic_id"]) if row else None
+
+    async def save_topic_mapping(self, max_chat_id: str, topic_id: int, topic_name: str = "") -> None:
+        """Сохраняет или обновляет связку чата Max с топиком."""
+        ts = self._local_timestamp()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO topic_mappings (max_chat_id, topic_id, topic_name, created_at, last_message_time)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(max_chat_id) DO UPDATE SET
+                    topic_id = excluded.topic_id,
+                    topic_name = excluded.topic_name,
+                    last_message_time = excluded.last_message_time
+                """,
+                (max_chat_id, topic_id, topic_name, ts, ts),
+            )
+            await db.commit()
+
+    async def get_max_chat_id_by_topic(self, topic_id: int) -> str | None:
+        """По topic_id найти max_chat_id."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT max_chat_id FROM topic_mappings WHERE topic_id = ?",
+                (topic_id,),
+            )
+            row = await cur.fetchone()
+            return str(row["max_chat_id"]) if row else None
+
+    async def update_topic_name(self, max_chat_id: str, new_name: str) -> None:
+        """Обновить имя топика."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE topic_mappings SET topic_name = ? WHERE max_chat_id = ?",
+                (new_name, max_chat_id),
+            )
+            await db.commit()
+
+    async def delete_topic_mapping(self, max_chat_id: str) -> None:
+        """Удалить запись о топике (например, при закрытии)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "DELETE FROM topic_mappings WHERE max_chat_id = ?",
+                (max_chat_id,),
+            )
+            await db.commit()
+
+    async def list_all_topic_mappings(self) -> list[dict]:
+        """Получить все связки (для команды /list)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT max_chat_id, topic_id, topic_name, created_at, last_message_time FROM topic_mappings ORDER BY created_at DESC",
+            )
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
