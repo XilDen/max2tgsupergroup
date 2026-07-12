@@ -163,6 +163,7 @@ class AccountManager:
         tg_user_id: int,
         max_chat_id,
         text: str,
+        reply_to: str | None = None,
         reply_metric: str | None = None,
     ) -> bool:
         async with self._user_lock(tg_user_id):
@@ -172,7 +173,7 @@ class AccountManager:
             runtime = self._runtimes.get(account_id)
             if not runtime:
                 return False
-            resp = await runtime.client.send_message(max_chat_id, text)
+            resp = await runtime.client.send_message(max_chat_id, text, reply_to=reply_to)
             ok = bool(resp)
             if ok and reply_metric:
                 try:
