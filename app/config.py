@@ -47,9 +47,6 @@ def load_settings() -> Settings:
     # Читаем супергруппу и флаг форума
     supergroup_id = os.environ.get("TG_SUPERGROUP_ID") or None
     forum_enabled = os.environ.get("FORUM_ENABLED", "true").lower() in ("1", "true", "yes")
-    # Если супергруппа не задана, принудительно отключаем форум
-    if not supergroup_id:
-        forum_enabled = False
         
     return Settings(
         tg_bot_token=os.environ["TG_BOT_TOKEN"],
