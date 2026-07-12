@@ -647,10 +647,11 @@ def create_max_client(
             except Exception:
                 log.exception("Failed to write report metric=%s", incoming_metric)
 
-        # --- ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО ЧАТА (личный чат или супергруппа) ---
+        # --- ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО ЧАТА И SUPERGROUP_ID ---
         target_chat_id = tg_user_id
         message_thread_id = None
         use_header = True
+        current_supergroup_id = None
 
         # Проверяем, есть ли у пользователя своя супергруппа
         user_supergroup = None
@@ -661,21 +662,24 @@ def create_max_client(
         if user_supergroup and settings and settings.forum_enabled:
             target_chat_id = int(user_supergroup)
             use_header = False
+            current_supergroup_id = user_supergroup
             log.debug("Using user's supergroup: %s", user_supergroup)
         elif settings and settings.tg_supergroup_id and settings.forum_enabled:
             target_chat_id = int(settings.tg_supergroup_id)
             use_header = False
+            current_supergroup_id = settings.tg_supergroup_id
             log.debug("Using global supergroup: %s", settings.tg_supergroup_id)
         else:
             # fallback – личный чат
             target_chat_id = tg_user_id
             use_header = True
+            current_supergroup_id = None
             log.debug("No supergroup, using private chat: %s", tg_user_id)
 
         # Если супергруппа используется, получаем или создаём топик
-        if not use_header:
+        if not use_header and current_supergroup_id:
             max_chat_id_str = str(msg.chat_id)
-            topic_id = await storage.get_topic_id(max_chat_id_str)
+            topic_id = await storage.get_topic_id(max_chat_id_str, current_supergroup_id)
             if topic_id is None:
                 # Определяем имя топика
                 if is_dm:
@@ -688,8 +692,9 @@ def create_max_client(
                         name=topic_name
                     )
                     topic_id = topic.message_thread_id
-                    await storage.save_topic_mapping(max_chat_id_str, topic_id, topic_name)
-                    log.info("Created topic for chat %s (topic_id=%d)", max_chat_id_str, topic_id)
+                    await storage.save_topic_mapping(max_chat_id_str, topic_id, topic_name, current_supergroup_id)
+                    log.info("Created topic for chat %s in supergroup %s (topic_id=%d)", 
+                             max_chat_id_str, current_supergroup_id, topic_id)
                 except Exception as e:
                     log.exception("Failed to create topic for chat %s", msg.chat_id)
                     topic_id = None
