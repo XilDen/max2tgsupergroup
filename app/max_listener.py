@@ -624,18 +624,8 @@ def create_max_client(
         header_text = _header(sender_label, chat_label, is_dm, account_label=account_label)
 
         # --- ФОРМИРОВАНИЕ КНОПКИ "ОТВЕТИТЬ" (только если не супергруппа) ---
-        if settings and settings.tg_supergroup_id and settings.forum_enabled:
-            # В супергруппе с топиками кнопка не нужна
-            kb = None
-        else:
-            kb = reply_keyboard(account_id, msg.chat_id, is_dm) if reply_enabled and not is_channel else None
-            if reply_enabled and is_channel:
-                log.debug(
-                    "Reply button hidden for channel account=%s chat=%s type=%s",
-                    account_id,
-                    msg.chat_id,
-                    resolver.chat_type(msg.chat_id),
-                )
+        # В супергруппе с топиками кнопка не нужна
+        kb = None
 
         if stats_callback:
             if is_channel:
