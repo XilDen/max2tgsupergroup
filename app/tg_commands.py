@@ -951,11 +951,28 @@ async def _on_list_topics(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def _on_rename_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Переименовать топик (админ в супергруппе)."""
+    if not await _ensure_terms_accepted(update, context):
+        return
+
     settings = _get_settings(context)
-    if not settings or not settings.tg_supergroup_id:
+    storage = _get_storage(context)
+    if not settings or not storage:
+        await update.message.reply_text("⚠️ Ошибка конфигурации.")
         return
-    if not _is_supergroup(update, settings):
+
+    tg_user_id = int(update.effective_user.id)
+    # Определяем supergroup_id для пользователя
+    user_supergroup = await storage.get_user_supergroup(tg_user_id)
+    supergroup_id = user_supergroup or settings.tg_supergroup_id
+    if not supergroup_id:
+        await update.message.reply_text("⚠️ Супергруппа не установлена. Используйте /setsupergroup.")
         return
+
+    # Проверяем, что команда выполняется в этой супергруппе
+    if str(update.effective_chat.id) != supergroup_id:
+        await update.message.reply_text("⚠️ Эта команда должна выполняться в вашей супергруппе.")
+        return
+
     if not _is_admin(update, context):
         await update.message.reply_text("⚠️ Команда доступна только администратору.")
         return
@@ -971,26 +988,19 @@ async def _on_rename_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text("⚠️ Укажите новое имя.")
         return
 
-    storage = _get_storage(context)
-    if not storage:
-        await update.message.reply_text("⚠️ Хранилище недоступно.")
-        return
-
     # Проверим, есть ли такая связка
-    topic_id = await storage.get_topic_id(max_chat_id)
+    topic_id = await storage.get_topic_id(max_chat_id, supergroup_id)
     if topic_id is None:
-        await update.message.reply_text(f"⚠️ Топик для чата {max_chat_id} не найден.")
+        await update.message.reply_text(f"⚠️ Топик для чата {max_chat_id} не найден в этой супергруппе.")
         return
 
     try:
-        # Переименовываем топик в Telegram
         await context.bot.edit_forum_topic(
-            chat_id=int(settings.tg_supergroup_id),
+            chat_id=int(supergroup_id),
             message_thread_id=topic_id,
             name=new_name
         )
-        # Обновляем имя в БД
-        await storage.update_topic_name(max_chat_id, new_name)
+        await storage.update_topic_name(max_chat_id, new_name, supergroup_id)
         await update.message.reply_text(f"✅ Топик для чата {max_chat_id} переименован в '{new_name}'.")
     except Exception as e:
         log.exception("Failed to rename topic for %s", max_chat_id)
@@ -999,11 +1009,26 @@ async def _on_rename_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def _on_close_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Закрыть топик и удалить связь (админ в супергруппе)."""
+    if not await _ensure_terms_accepted(update, context):
+        return
+
     settings = _get_settings(context)
-    if not settings or not settings.tg_supergroup_id:
+    storage = _get_storage(context)
+    if not settings or not storage:
+        await update.message.reply_text("⚠️ Ошибка конфигурации.")
         return
-    if not _is_supergroup(update, settings):
+
+    tg_user_id = int(update.effective_user.id)
+    user_supergroup = await storage.get_user_supergroup(tg_user_id)
+    supergroup_id = user_supergroup or settings.tg_supergroup_id
+    if not supergroup_id:
+        await update.message.reply_text("⚠️ Супергруппа не установлена. Используйте /setsupergroup.")
         return
+
+    if str(update.effective_chat.id) != supergroup_id:
+        await update.message.reply_text("⚠️ Эта команда должна выполняться в вашей супергруппе.")
+        return
+
     if not _is_admin(update, context):
         await update.message.reply_text("⚠️ Команда доступна только администратору.")
         return
@@ -1014,24 +1039,17 @@ async def _on_close_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     max_chat_id = args[0].strip()
-    storage = _get_storage(context)
-    if not storage:
-        await update.message.reply_text("⚠️ Хранилище недоступно.")
-        return
-
-    topic_id = await storage.get_topic_id(max_chat_id)
+    topic_id = await storage.get_topic_id(max_chat_id, supergroup_id)
     if topic_id is None:
-        await update.message.reply_text(f"⚠️ Топик для чата {max_chat_id} не найден.")
+        await update.message.reply_text(f"⚠️ Топик для чата {max_chat_id} не найден в этой супергруппе.")
         return
 
     try:
-        # Закрываем топик в Telegram (можно также удалить, но лучше закрыть)
         await context.bot.close_forum_topic(
-            chat_id=int(settings.tg_supergroup_id),
+            chat_id=int(supergroup_id),
             message_thread_id=topic_id
         )
-        # Удаляем запись из БД
-        await storage.delete_topic_mapping(max_chat_id)
+        await storage.delete_topic_mapping(max_chat_id, supergroup_id)
         await update.message.reply_text(f"✅ Топик для чата {max_chat_id} закрыт и удалён из базы.")
     except Exception as e:
         log.exception("Failed to close topic for %s", max_chat_id)
