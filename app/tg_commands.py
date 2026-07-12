@@ -1058,10 +1058,28 @@ async def _on_close_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик сообщений из супергруппы (текст, медиа)."""
+    log.debug("_on_supergroup_message called: chat=%s, user=%s, topic_id=%s, reply_to=%s",
+              update.effective_chat.id if update.effective_chat else None,
+              update.effective_user.id if update.effective_user else None,
+              update.effective_message.message_thread_id if update.effective_message else None,
+              bool(update.effective_message.reply_to_message) if update.effective_message else False)
+
     settings = _get_settings(context)
-    if not settings or not settings.tg_supergroup_id:
+    storage = _get_storage(context)
+    if not settings or not storage:
         return
-    if not _is_supergroup(update, settings):
+
+    # Определяем supergroup_id пользователя
+    tg_user_id = int(update.effective_user.id)
+    user_supergroup = await storage.get_user_supergroup(tg_user_id)
+    supergroup_id = user_supergroup or settings.tg_supergroup_id
+    if not supergroup_id:
+        await update.message.reply_text("⚠️ Супергруппа не установлена. Используйте /setsupergroup.")
+        return
+
+    # Проверяем, что сообщение пришло из этой супергруппы
+    if str(update.effective_chat.id) != supergroup_id:
+        log.debug("Message from different supergroup, ignoring")
         return
 
     # Игнорируем сообщения от самого бота
@@ -1075,19 +1093,13 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("ℹ️ Пожалуйста, отвечайте в существующих топиках.")
         return
 
-    storage = _get_storage(context)
-    if not storage:
-        await update.message.reply_text("⚠️ Хранилище недоступно.")
-        return
-
-    # Получаем max_chat_id по топику
-    max_chat_id = await storage.get_max_chat_id_by_topic(topic_id)
+    # Получаем max_chat_id по топику и supergroup_id
+    max_chat_id = await storage.get_max_chat_id_by_topic_and_supergroup(topic_id, supergroup_id)
     if not max_chat_id:
         await update.message.reply_text("⚠️ Этот топик не связан с чатом в Max.")
         return
 
     manager: AccountManager = context.bot_data["account_manager"]
-    tg_user_id = update.effective_user.id
     accounts = await manager.list_accounts_for_user(tg_user_id)
     if not accounts:
         await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
@@ -1149,12 +1161,23 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⚠️ Отправьте текстовое сообщение или медиа с подписью.")
         return
 
+    # Если это ответ на сообщение, попробуем получить reply_to
+    reply_to_max_id = None
+    if is_reply:
+        # Пытаемся найти mapping по ID сообщения, на которое отвечаем
+        reply_to_msg_id = update.effective_message.reply_to_message.message_id
+        mapping = await storage.get_message_mapping(reply_to_msg_id)
+        if mapping:
+            reply_to_max_id = mapping[1]  # max_message_id
+            log.debug("Found reply_to_max_id=%s for telegram_msg_id=%s", reply_to_max_id, reply_to_msg_id)
+
     try:
         ok = await manager.send_message(
             account_id=account_id,
             tg_user_id=tg_user_id,
             max_chat_id=max_chat_id,
             text=text,
+            reply_to=reply_to_max_id,  # передаём ID исходного сообщения в MAX
             reply_metric=reply_metric,
         )
         if not ok:
