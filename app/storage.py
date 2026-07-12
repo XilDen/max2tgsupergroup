@@ -229,15 +229,15 @@ class Storage:
             return self._row_to_user(row)
 
     async def get_user_by_supergroup(self, supergroup_id: str) -> int | None:
-    """Найти tg_user_id, которому принадлежит данная супергруппа."""
-    async with aiosqlite.connect(self._db_path) as db:
-        db.row_factory = aiosqlite.Row
-        cur = await db.execute(
-            "SELECT tg_user_id FROM tg_users WHERE supergroup_id = ?",
-            (supergroup_id,)
-        )
-        row = await cur.fetchone()
-        return int(row["tg_user_id"]) if row else None
+        """Найти tg_user_id, которому принадлежит данная супергруппа."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT tg_user_id FROM tg_users WHERE supergroup_id = ?",
+                (supergroup_id,)
+            )
+            row = await cur.fetchone()
+            return int(row["tg_user_id"]) if row else None
     
     async def get_user(self, tg_user_id: int) -> TgUserRecord | None:
         async with aiosqlite.connect(self._db_path) as db:
