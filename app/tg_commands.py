@@ -1068,17 +1068,15 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
     if not settings or not storage:
         return
 
-    # Определяем supergroup_id пользователя
-    tg_user_id = int(update.effective_user.id)
-    user_supergroup = await storage.get_user_supergroup(tg_user_id)
-    supergroup_id = user_supergroup or settings.tg_supergroup_id
-    if not supergroup_id:
-        await update.message.reply_text("⚠️ Супергруппа не установлена. Используйте /setsupergroup.")
+    # Проверяем, что сообщение из супергруппы
+    chat_id = str(update.effective_chat.id)
+    if not chat_id.startswith("-100"):
         return
 
-    # Проверяем, что сообщение пришло из этой супергруппы
-    if str(update.effective_chat.id) != supergroup_id:
-        log.debug("Message from different supergroup, ignoring")
+    # Находим владельца супергруппы
+    owner_tg_user_id = await storage.get_user_by_supergroup(chat_id)
+    if not owner_tg_user_id:
+        await update.message.reply_text("⚠️ Эта супергруппа не привязана к аккаунту Max. Используйте /setsupergroup.")
         return
 
     # Игнорируем сообщения от самого бота
@@ -1093,15 +1091,16 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     # Получаем max_chat_id по топику и supergroup_id
-    max_chat_id = await storage.get_max_chat_id_by_topic_and_supergroup(topic_id, supergroup_id)
+    max_chat_id = await storage.get_max_chat_id_by_topic_and_supergroup(topic_id, chat_id)
     if not max_chat_id:
         await update.message.reply_text("⚠️ Этот топик не связан с чатом в Max.")
         return
 
     manager: AccountManager = context.bot_data["account_manager"]
-    accounts = await manager.list_accounts_for_user(tg_user_id)
+    # Используем аккаунты владельца супергруппы
+    accounts = await manager.list_accounts_for_user(owner_tg_user_id)
     if not accounts:
-        await update.message.reply_text("⚠️ У вас нет активных аккаунтов Max.")
+        await update.message.reply_text("⚠️ У владельца супергруппы нет активных аккаунтов Max.")
         return
     account_id = accounts[0].id
 
@@ -1140,7 +1139,7 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
             caption = update.effective_message.text or update.effective_message.caption or ""
             ok = await manager.send_media(
                 account_id=account_id,
-                tg_user_id=tg_user_id,
+                tg_user_id=owner_tg_user_id,
                 max_chat_id=max_chat_id,
                 file_bytes=file_bytes,
                 filename=filename,
@@ -1160,11 +1159,10 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⚠️ Отправьте текстовое сообщение или медиа с подписью.")
         return
 
-    # Пока не сохраняем mapping, поэтому reply_to = None
     try:
         ok = await manager.send_message(
             account_id=account_id,
-            tg_user_id=tg_user_id,
+            tg_user_id=owner_tg_user_id,
             max_chat_id=max_chat_id,
             text=text,
             reply_to=None,  # пока без цитирования
