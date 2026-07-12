@@ -1118,9 +1118,7 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
                 caption=caption,
                 reply_metric=reply_metric,
             )
-            if ok:
-                await update.message.reply_text("✅ Медиа отправлено в Max.")
-            else:
+            if not ok:
                 await update.message.reply_text("⚠️ Не удалось отправить медиа в Max.")
         except Exception as e:
             log.exception("Failed to send media from supergroup")
@@ -1141,14 +1139,33 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
             text=text,
             reply_metric=reply_metric,
         )
-        if ok:
-            await update.message.reply_text("✅ Сообщение отправлено в Max." if not is_reply else "✅ Ответ отправлен в Max.")
-        else:
-            await update.message.reply_text("⚠️ Не удалось отправить сообщение в Max.")
+        if not ok:
+            await update.message.reply_text("⚠️ Не удалось отправить ответ в Max.")
     except Exception as e:
         log.exception("Failed to send message from supergroup")
         await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
 
+async def _on_setsupergroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить супергруппу для текущего пользователя."""
+    if not update.effective_chat or update.effective_chat.type != "supergroup":
+        await update.message.reply_text("⚠️ Эта команда должна выполняться в супергруппе.")
+        return
+    if not await _ensure_terms_accepted(update, context):
+        return
+
+    storage = _get_storage(context)
+    if not storage:
+        await update.message.reply_text("⚠️ Хранилище недоступно.")
+        return
+
+    tg_user_id = int(update.effective_user.id)
+    chat_id = str(update.effective_chat.id)
+
+    await storage.set_user_supergroup(tg_user_id, chat_id)
+    await update.message.reply_text(
+        f"✅ Супергруппа установлена!\n"
+        f"Теперь все сообщения из Max будут пересылаться сюда."
+    )
 # ==================== Регистрация обработчиков ====================
 
 def register_handlers(app: Application) -> None:
@@ -1182,6 +1199,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("list_topics", _on_list_topics, filters=supergroup_filter))
     app.add_handler(CommandHandler("rename_topic", _on_rename_topic, filters=supergroup_filter))
     app.add_handler(CommandHandler("close_topic", _on_close_topic, filters=supergroup_filter))
+    app.add_handler(CommandHandler("setsupergroup", _on_setsupergroup, filters=~filters.ChatType.PRIVATE))
 
     # Обработчик всех сообщений из супергруппы (текст, медиа, команды?)
     # Он должен срабатывать после команд, поэтому добавляем его с низким приоритетом
