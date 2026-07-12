@@ -575,6 +575,17 @@ class Storage:
             )
             await db.commit()
 
+    async def get_max_chat_id_by_topic_and_supergroup(self, topic_id: int, supergroup_id: str) -> str | None:
+        """По topic_id и supergroup_id найти max_chat_id."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT max_chat_id FROM topic_mappings WHERE topic_id = ? AND supergroup_id = ?",
+                (topic_id, supergroup_id),
+            )
+            row = await cur.fetchone()
+            return str(row["max_chat_id"]) if row else None
+    
     async def get_max_chat_id_by_topic(self, topic_id: int) -> str | None:
         """По topic_id найти max_chat_id."""
         async with aiosqlite.connect(self._db_path) as db:
