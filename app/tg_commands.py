@@ -1055,7 +1055,6 @@ async def _on_close_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log.exception("Failed to close topic for %s", max_chat_id)
         await update.message.reply_text(f"⚠️ Не удалось закрыть топик: {e}")
 
-
 async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик сообщений из супергруппы (текст, медиа)."""
     log.debug("_on_supergroup_message called: chat=%s, user=%s, topic_id=%s, reply_to=%s",
@@ -1106,7 +1105,7 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     account_id = accounts[0].id
 
-    # Определяем, является ли сообщение ответом на предыдущее
+    # Определяем, является ли сообщение ответом на предыдущее (для статистики)
     is_reply = bool(update.effective_message.reply_to_message)
     reply_metric = "reply_group" if is_reply else "forward_group"
 
@@ -1161,23 +1160,14 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("⚠️ Отправьте текстовое сообщение или медиа с подписью.")
         return
 
-    # Если это ответ на сообщение, попробуем получить reply_to
-    reply_to_max_id = None
-    if is_reply:
-        # Пытаемся найти mapping по ID сообщения, на которое отвечаем
-        reply_to_msg_id = update.effective_message.reply_to_message.message_id
-        mapping = await storage.get_message_mapping(reply_to_msg_id)
-        if mapping:
-            reply_to_max_id = mapping[1]  # max_message_id
-            log.debug("Found reply_to_max_id=%s for telegram_msg_id=%s", reply_to_max_id, reply_to_msg_id)
-
+    # Пока не сохраняем mapping, поэтому reply_to = None
     try:
         ok = await manager.send_message(
             account_id=account_id,
             tg_user_id=tg_user_id,
             max_chat_id=max_chat_id,
             text=text,
-            reply_to=reply_to_max_id,  # передаём ID исходного сообщения в MAX
+            reply_to=None,  # пока без цитирования
             reply_metric=reply_metric,
         )
         if not ok:
@@ -1185,6 +1175,7 @@ async def _on_supergroup_message(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         log.exception("Failed to send message from supergroup")
         await update.message.reply_text(f"⚠️ Ошибка при отправке: {e}")
+
 
 async def _on_setsupergroup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Установить супергруппу для текущего пользователя."""
