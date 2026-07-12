@@ -38,6 +38,7 @@ class TgUserRecord:
     terms_accepted_at: str | None
     activated_at: str | None
     accounts_count: int = 0
+    supergroup_id: str | None = None   # НОВОЕ ПОЛЕ
 
 
 @dataclass(frozen=True)
@@ -75,7 +76,8 @@ class Storage:
                     is_active INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     terms_accepted_at TEXT,
-                    activated_at TEXT
+                    activated_at TEXT,
+                    supergroup_id TEXT    -- НОВАЯ КОЛОНКА
                 )
                 """
             )
@@ -105,8 +107,6 @@ class Storage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_daily_report_stats_day ON daily_report_stats(day)"
             )
-
-          # Новая таблица для топиков супергруппы
             await db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS topic_mappings (
@@ -121,8 +121,11 @@ class Storage:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_topic_mappings_topic_id ON topic_mappings(topic_id)"
             )
-            
+
+            # Убедимся, что колонка supergroup_id есть (для миграции старых БД)
+            await self._ensure_column(db, "tg_users", "supergroup_id", "TEXT")
             await self._ensure_column(db, "tg_users", "terms_accepted_at", "TEXT")
+
             # Migrate legacy consents table into tg_users.terms_accepted_at when present.
             consent_exists_cur = await db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tg_user_consents' LIMIT 1"
@@ -198,6 +201,7 @@ class Storage:
             terms_accepted_at=str(row["terms_accepted_at"]) if row["terms_accepted_at"] else None,
             activated_at=str(row["activated_at"]) if row["activated_at"] else None,
             accounts_count=int(row["accounts_count"]) if "accounts_count" in row.keys() else 0,
+            supergroup_id=str(row["supergroup_id"]) if row.get("supergroup_id") else None,
         )
 
     async def ensure_user(self, tg_user_id: int) -> TgUserRecord:
@@ -291,15 +295,15 @@ class Storage:
                     u.created_at,
                     u.terms_accepted_at,
                     u.activated_at,
+                    u.supergroup_id,
                     COUNT(a.id) as accounts_count
                 FROM tg_users u
                 LEFT JOIN max_accounts a
                     ON a.tg_user_id = u.tg_user_id AND a.is_active = 1
-                GROUP BY u.tg_user_id, u.is_active, u.created_at, u.terms_accepted_at, u.activated_at
+                GROUP BY u.tg_user_id, u.is_active, u.created_at, u.terms_accepted_at, u.activated_at, u.supergroup_id
                 ORDER BY u.created_at DESC
                 LIMIT ? OFFSET ?
-                """
-                ,
+                """,
                 (page_size, offset),
             )
             rows = await cur.fetchall()
@@ -536,7 +540,7 @@ class Storage:
             cur_day += timedelta(days=1)
         return result
 
-# ==================== Методы для работы с топиками ====================
+    # ==================== Методы для работы с топиками ====================
 
     async def get_topic_id(self, max_chat_id: str) -> int | None:
         """Возвращает topic_id для данного чата Max или None."""
@@ -604,3 +608,25 @@ class Storage:
             )
             rows = await cur.fetchall()
             return [dict(row) for row in rows]
+
+    # ==================== НОВЫЕ МЕТОДЫ ДЛЯ ПОЛЬЗОВАТЕЛЬСКИХ СУПЕРГРУПП ====================
+
+    async def set_user_supergroup(self, tg_user_id: int, supergroup_id: str | None) -> None:
+        """Установить supergroup_id для пользователя."""
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                "UPDATE tg_users SET supergroup_id = ? WHERE tg_user_id = ?",
+                (supergroup_id, tg_user_id)
+            )
+            await db.commit()
+
+    async def get_user_supergroup(self, tg_user_id: int) -> str | None:
+        """Получить supergroup_id пользователя."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT supergroup_id FROM tg_users WHERE tg_user_id = ?",
+                (tg_user_id,)
+            )
+            row = await cur.fetchone()
+            return str(row["supergroup_id"]) if row and row["supergroup_id"] else None
