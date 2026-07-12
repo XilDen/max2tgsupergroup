@@ -693,6 +693,7 @@ def create_max_client(
                         name=topic_name
                     )
                     topic_id = topic.message_thread_id
+                    log.debug("Saving mapping: max_chat_id=%s, topic_id=%s, supergroup_id=%s", max_chat_id_str, topic_id, current_supergroup_id)
                     await storage.save_topic_mapping(max_chat_id_str, topic_id, topic_name, current_supergroup_id)
                     log.info("Created topic for chat %s in supergroup %s (topic_id=%d)", 
                              max_chat_id_str, current_supergroup_id, topic_id)
